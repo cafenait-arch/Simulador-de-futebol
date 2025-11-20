@@ -15,23 +15,37 @@ const App = {
         
         const getTable = tableName => this.db.exec(`SELECT * FROM ${tableName}`)[0]?.values || [];
         
-        this.countries = getTable("Country").map(([id, name]) => ({ id: id.toString(), name }));
+        this.countries = getTable("Country").map(([id, name]) => ({ 
+            id: id != null ? id.toString() : null, 
+            name 
+        })).filter(c => c.id != null);
+        
         this.competitions = getTable("Competition").map(([id, countryId, name, type, importanceOrder, recurring, startMonth]) => ({
-            id: id.toString(), countryId: countryId.toString(), name, type: +type, 
-            importanceOrder: +importanceOrder, recurring: +recurring, startMonth: +startMonth
-        }));
+            id: id != null ? id.toString() : null, 
+            countryId: countryId != null ? countryId.toString() : null, 
+            name, 
+            type: +type, 
+            importanceOrder: +importanceOrder, 
+            recurring: +recurring, 
+            startMonth: +startMonth
+        })).filter(c => c.id != null);
+        
         this.clubs = getTable("Club").map(([id, name, rating, countryId, bTeamOf]) => ({
-            id: id.toString(), name, rating: +rating, countryId: countryId.toString(), 
-            originalRating: +rating, bTeamOf: bTeamOf ? bTeamOf.toString() : null,
+            id: id != null ? id.toString() : null, 
+            name, 
+            rating: +rating, 
+            countryId: countryId != null ? countryId.toString() : null, 
+            originalRating: +rating, 
+            bTeamOf: bTeamOf ? bTeamOf.toString() : null,
             competitions: [],
             stages: [],
             originalCompetitions: [],
             originalStages: []
-        }));
+        })).filter(c => c.id != null);
         
         this.competitionStages = getTable("CompetitionStage").map(([id, competitionId, name, startingWeek, stageType, numLegs, numRounds, isLastStage, numGroups, allowByeTeamsOnDraw, numberOfTeams, duration, isWinnerDecisionStage]) => ({
-            id: id.toString(), 
-            competitionId: competitionId.toString(),
+            id: id != null ? id.toString() : null, 
+            competitionId: competitionId != null ? competitionId.toString() : null,
             name, 
             startingWeek: +startingWeek,
             stageType: +stageType, 
@@ -43,15 +57,19 @@ const App = {
             numberOfTeams: +numberOfTeams, 
             duration: +duration, 
             isWinnerDecisionStage: +isWinnerDecisionStage
-        }));
+        })).filter(s => s.id != null && s.competitionId != null);
         
         this.competitionStageClubs = getTable("CompetitionStageClub").map(([clubId, stageId]) => ({
-            clubId: clubId.toString(), stageId: stageId.toString()
-        }));
+            clubId: clubId != null ? clubId.toString() : null, 
+            stageId: stageId != null ? stageId.toString() : null
+        })).filter(c => c.clubId != null && c.stageId != null);
+        
         this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([stageIdFrom, stageIdTo, place, type]) => ({
-            stageIdFrom: stageIdFrom.toString(), stageIdTo: stageIdTo.toString(), 
-            place: +place, type: +type
-        }));
+            stageIdFrom: stageIdFrom != null ? stageIdFrom.toString() : null, 
+            stageIdTo: stageIdTo != null ? stageIdTo.toString() : null, 
+            place: +place, 
+            type: +type
+        })).filter(t => t.stageIdFrom != null && t.stageIdTo != null);
 
         this.clubs.forEach(club => {
             const stageClubs = this.competitionStageClubs.filter(csc => csc.clubId === club.id);
@@ -215,6 +233,24 @@ const App = {
             sharedStageResults.set(stage.id, stageResult);
             competitionResult.stages.push(stageResult);
             
+            // Se foi um playoff, avança vencedores automaticamente para o próximo playoff stage
+            if (stage.stageType === 1 && stageResult.playoffData?.winners?.length > 0) {
+                const nextPlayoffStage = this.findNextPlayoffStage(stage, competition);
+                if (nextPlayoffStage) {
+                    if (!qualifiedTeams.has(nextPlayoffStage.id)) {
+                        qualifiedTeams.set(nextPlayoffStage.id, []);
+                    }
+                    const currentTeams = qualifiedTeams.get(nextPlayoffStage.id);
+                    stageResult.playoffData.winners.forEach(winner => {
+                        const team = this.getClub(winner.id);
+                        if (team && !currentTeams.find(t => t.id === team.id)) {
+                            currentTeams.push(team);
+                        }
+                    });
+                    console.log("[Playoff Auto-Advance]", stage.id, "→", nextPlayoffStage.id, "winners:", stageResult.playoffData.winners.map(w => w.name));
+                }
+            }
+            
             const transitions = this.competitionStageTransitions.filter(t => t.stageIdFrom === stage.id);
             
             for (const transition of transitions) {
@@ -240,24 +276,10 @@ const App = {
                     
                     // Type 106: adiciona ao mapa global para injetar em outra competição no mesmo ano
                     if (transition.type === 106) {
-                        console.log("[DEBUG 106] Detectada transição tipo 106:", {
-                            from: competition.name,
-                            stageFrom: stage.id,
-                            stageTo: transition.stageIdTo,
-                            teams: teamsToTransfer.map(t=>t.name)
-                        });
-                        
                         const targetStage = this.competitionStages.find(s => s.id === transition.stageIdTo);
                         if (targetStage) {
                             const targetCompIds = targetStage.competitionId.split(',').map(id => id.trim());
                             const isDifferentCompetition = !targetCompIds.includes(competition.id);
-                            
-                            console.log("[DEBUG 106] Target stage info:", {
-                                targetStageId: targetStage.id,
-                                targetCompIds,
-                                currentCompId: competition.id,
-                                isDifferentCompetition
-                            });
                             
                             if (isDifferentCompetition) {
                                 if (!crossQualified.has(transition.stageIdTo)) {
@@ -269,12 +291,7 @@ const App = {
                                         globalList.push(team);
                                     }
                                 });
-                                console.log("[106 ADICIONADO] From", competition.name, "stage", stage.id, "to stage", transition.stageIdTo, "teams:", teamsToTransfer.map(t=>t.name));
-                            } else {
-                                console.log("[106 IGNORADO] Mesma competição, não adiciona ao crossQualified");
                             }
-                        } else {
-                            console.log("[DEBUG 106] Target stage NÃO encontrado:", transition.stageIdTo);
                         }
                     }
                 }
@@ -327,7 +344,8 @@ const App = {
         if (stage.stageType === 1) {
             const playoffData = await this.simulatePlayoff(teams, stage);
             stageResult.playoffBracket = playoffData.bracket;
-            stageResult.standings = this.getPlayoffTeamsInOrder(playoffData.bracket);
+            stageResult.playoffData = playoffData; // Armazena os dados completos incluindo winners
+            stageResult.standings = this.getPlayoffTeamsInOrder(playoffData.bracket, playoffData.winners);
         }
         else if (stage.numGroups > 1) {
             stageResult.groups = await this.simulateGroupStage(teams, stage);
@@ -351,35 +369,69 @@ const App = {
         return stageResult;
     },
 
-    getPlayoffTeamsInOrder(playoffBracket) {
-        const teamRound = new Map();
+    getPlayoffTeamsInOrder(playoffBracket, winners = []) {
+        // Com a nova estrutura, apenas cria standings básicos
+        // Winners = vencedores que avançam
+        // Losers = perdedores que são eliminados
+        const standings = [];
         
-        playoffBracket.forEach((round, roundIndex) => {
-            round.matches.forEach(match => {
-                if (match.winner && !match.winner.isBye) {
+        if (playoffBracket.length > 0 && playoffBracket[0].matches) {
+            playoffBracket[0].matches.forEach(match => {
+                if (!match.isBye) {
+                    // Adiciona o vencedor
+                    standings.push({
+                        id: match.winner.id,
+                        name: match.winner.name,
+                        played: 1, won: 1, drawn: 0, lost: 0,
+                        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 3,
+                        playoffRound: 1,
+                        qualified: true
+                    });
+                    
+                    // Adiciona o perdedor
                     const loser = match.winner.id === match.team1.id ? match.team2 : match.team1;
-                    if (!loser.isBye && !teamRound.has(loser.id)) {
-                        teamRound.set(loser.id, roundIndex);
-                    }
+                    standings.push({
+                        id: loser.id,
+                        name: loser.name,
+                        played: 1, won: 0, drawn: 0, lost: 1,
+                        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
+                        playoffRound: 1,
+                        qualified: false
+                    });
+                } else {
+                    // Bye - time avança automaticamente
+                    standings.push({
+                        id: match.winner.id,
+                        name: match.winner.name,
+                        played: 0, won: 0, drawn: 0, lost: 0,
+                        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
+                        playoffRound: 1,
+                        qualified: true
+                    });
                 }
             });
-        });
-        
-        const final = playoffBracket[playoffBracket.length - 1];
-        if (final?.matches?.[0]?.winner) {
-            teamRound.set(final.matches[0].winner.id, playoffBracket.length);
         }
         
-        const allTeams = this.getAllTeamsFromPlayoff(playoffBracket);
-        return allTeams
-            .map(team => ({
-                id: team.id,
-                name: team.name,
-                played: 0, won: 0, drawn: 0, lost: 0,
-                goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
-                playoffRound: teamRound.get(team.id) || 0
-            }))
-            .sort((a, b) => b.playoffRound - a.playoffRound);
+        return standings.sort((a, b) => {
+            if (a.qualified && !b.qualified) return -1;
+            if (!a.qualified && b.qualified) return 1;
+            return b.points - a.points;
+        });
+    },
+
+    findNextPlayoffStage(currentStage, competition) {
+        // Encontra o próximo stage de playoff (stageType=1) com ID maior dentro da mesma competição
+        const competitionIds = competition.id.split(',').map(id => id.trim());
+        
+        return this.competitionStages.find(stage => {
+            if (stage.stageType !== 1) return false; // Deve ser playoff
+            if (stage.id <= currentStage.id) return false; // Deve ter ID maior
+            
+            const stageCompIds = stage.competitionId.split(',').map(id => id.trim());
+            const isInSameCompetition = stageCompIds.some(id => competitionIds.includes(id));
+            
+            return isInSameCompetition;
+        });
     },
 
     getAllTeamsFromPlayoff(playoffBracket) {
@@ -441,207 +493,107 @@ const App = {
     async simulatePlayoff(teams, stage) {
         const numLegs = stage.numLegs || 1;
         const bracket = [];
-        const standings = [];
         
         let allTeams = teams
             .filter(team => team && team.id)
             .map(team => ({ ...team }));
 
         if (allTeams.length < 2) {
-            return { bracket: [], championId: null, standings: [] };
+            return { bracket: [], championId: null, winners: [] };
         }
 
-        const targetBracketSize = Math.pow(2, Math.ceil(Math.log2(allTeams.length)));
-        const numPreliminaryMatches = allTeams.length - targetBracketSize;
+        // Simula apenas UMA rodada de confrontos
+        const round = { number: 1, matches: [], isPreliminary: false };
+        const winners = [];
         
-        let roundTeams = allTeams;
-        let roundNumber = 1;
-
-        if (numPreliminaryMatches > 0) {
-            const preliminaryRound = { number: roundNumber, matches: [], isPreliminary: true };
-            const preliminaryWinners = [];
-            
-            const shuffledTeams = [...roundTeams].sort(() => Math.random() - 0.5);
-            
-            for (let i = 0; i < numPreliminaryMatches * 2; i += 2) {
-                if (i + 1 >= shuffledTeams.length) break;
-                
-                const team1 = shuffledTeams[i];
-                const team2 = shuffledTeams[i + 1];
-                
-                if (!team1 || !team2 || !team1.id || !team2.id) {
-                    continue;
-                }
-                
-                const club1 = this.getClub(team1.id);
-                const club2 = this.getClub(team2.id);
-                
-                if (!club1 || !club2) {
-                    continue;
-                }
-                
-                let aggregateHome = 0;
-                let aggregateAway = 0;
-                
-                const homeExpected1 = this.calcExpectedGoals(club1.rating, club2.rating, true);
-                const awayExpected1 = this.calcExpectedGoals(club2.rating, club1.rating, false);
-                const homeScore1 = this.poisson(homeExpected1);
-                const awayScore1 = this.poisson(awayExpected1);
-                aggregateHome += homeScore1;
-                aggregateAway += awayScore1;
-                
-                let homeScore2 = 0;
-                let awayScore2 = 0;
-                if (numLegs > 1) {
-                    const homeExpected2 = this.calcExpectedGoals(club2.rating, club1.rating, true);
-                    const awayExpected2 = this.calcExpectedGoals(club1.rating, club2.rating, false);
-                    homeScore2 = this.poisson(homeExpected2);
-                    awayScore2 = this.poisson(awayExpected2);
-                    aggregateHome += awayScore2;
-                    aggregateAway += homeScore2;
-                }
-                
-                let winner;
-                if (aggregateHome > aggregateAway) {
-                    winner = team1;
-                } else if (aggregateAway > aggregateHome) {
-                    winner = team2;
-                } else {
-                    winner = Math.random() > 0.5 ? team1 : team2;
-                }
-                
-                preliminaryRound.matches.push({
-                    team1, team2, 
-                    homeScore: homeScore1,
-                    awayScore: awayScore1,
-                    homeScore2: homeScore2,
-                    awayScore2: awayScore2,
-                    aggregateHome,
-                    aggregateAway,
-                    winner,
-                    isBye: false, 
-                    isPenalty: aggregateHome === aggregateAway,
-                    numLegs: numLegs
-                });
-                preliminaryWinners.push(winner);
+        // Emparelha times de forma aleatória
+        const shuffledTeams = [...allTeams].sort(() => Math.random() - 0.5);
+        
+        for (let i = 0; i < shuffledTeams.length; i += 2) {
+            if (i + 1 >= shuffledTeams.length) {
+                // Time ímpar avança automaticamente (bye)
+                winners.push(shuffledTeams[i]);
+                continue;
             }
             
-            const remainingTeams = shuffledTeams.slice(numPreliminaryMatches * 2);
-            roundTeams = [...preliminaryWinners, ...remainingTeams];
+            const team1 = shuffledTeams[i];
+            const team2 = shuffledTeams[i + 1];
             
-            bracket.push(preliminaryRound);
-            roundNumber++;
-        }
-
-        if (roundTeams.length < 2) {
-            return { bracket, championId: roundTeams[0]?.id || null, standings };
-        }
-
-        while (roundTeams.length > 1) {
-            const round = { number: roundNumber, matches: [] };
-            const nextRoundTeams = [];
-            
-            const shuffledTeams = [...roundTeams].sort(() => Math.random() - 0.5);
-            
-            for (let i = 0; i < shuffledTeams.length; i += 2) {
-                if (i + 1 >= shuffledTeams.length) {
-                    const loneTeam = shuffledTeams[i];
-                    if (loneTeam && loneTeam.id) {
-                        round.matches.push({
-                            team1: loneTeam,
-                            team2: { id: "BYE", name: "BYE", isBye: true },
-                            homeScore: 0,
-                            awayScore: 0,
-                            winner: loneTeam,
-                            isBye: true,
-                            numLegs: numLegs
-                        });
-                        nextRoundTeams.push(loneTeam);
-                    }
-                    break;
-                }
-                
-                const team1 = shuffledTeams[i];
-                const team2 = shuffledTeams[i + 1];
-                
-                if (!team1 || !team2 || !team1.id || !team2.id) {
-                    continue;
-                }
-                
-                const club1 = this.getClub(team1.id);
-                const club2 = this.getClub(team2.id);
-                
-                if (!club1 || !club2) {
-                    continue;
-                }
-                
-                let aggregateHome = 0;
-                let aggregateAway = 0;
-                
-                const homeExpected1 = this.calcExpectedGoals(club1.rating, club2.rating, true);
-                const awayExpected1 = this.calcExpectedGoals(club2.rating, club1.rating, false);
-                const homeScore1 = this.poisson(homeExpected1);
-                const awayScore1 = this.poisson(awayExpected1);
-                aggregateHome += homeScore1;
-                aggregateAway += awayScore1;
-                
-                let homeScore2 = 0;
-                let awayScore2 = 0;
-                if (numLegs > 1) {
-                    const homeExpected2 = this.calcExpectedGoals(club2.rating, club1.rating, true);
-                    const awayExpected2 = this.calcExpectedGoals(club1.rating, club2.rating, false);
-                    homeScore2 = this.poisson(homeExpected2);
-                    awayScore2 = this.poisson(awayExpected2);
-                    aggregateHome += awayScore2;
-                    aggregateAway += homeScore2;
-                }
-                
-                let winner;
-                if (aggregateHome > aggregateAway) {
-                    winner = team1;
-                } else if (aggregateAway > aggregateHome) {
-                    winner = team2;
-                } else {
-                    winner = Math.random() > 0.5 ? team1 : team2;
-                }
-                
-                round.matches.push({
-                    team1, team2, 
-                    homeScore: homeScore1,
-                    awayScore: awayScore1,
-                    homeScore2: homeScore2,
-                    awayScore2: awayScore2,
-                    aggregateHome,
-                    aggregateAway,
-                    winner,
-                    isBye: false, 
-                    isPenalty: aggregateHome === aggregateAway,
-                    numLegs: numLegs
-                });
-                nextRoundTeams.push(winner);
+            if (!team1 || !team2 || !team1.id || !team2.id) {
+                continue;
             }
             
-            bracket.push(round);
-            roundTeams = nextRoundTeams;
-            roundNumber++;
+            const club1 = this.getClub(team1.id);
+            const club2 = this.getClub(team2.id);
             
-            if (roundNumber > 20) {
-                break;
+            if (!club1 || !club2) {
+                continue;
             }
+            
+            let aggregateHome = 0;
+            let aggregateAway = 0;
+            
+            const homeExpected1 = this.calcExpectedGoals(club1.rating, club2.rating, true);
+            const awayExpected1 = this.calcExpectedGoals(club2.rating, club1.rating, false);
+            const homeScore1 = this.poisson(homeExpected1);
+            const awayScore1 = this.poisson(awayExpected1);
+            aggregateHome += homeScore1;
+            aggregateAway += awayScore1;
+            
+            let homeScore2 = 0;
+            let awayScore2 = 0;
+            if (numLegs > 1) {
+                const homeExpected2 = this.calcExpectedGoals(club2.rating, club1.rating, true);
+                const awayExpected2 = this.calcExpectedGoals(club1.rating, club2.rating, false);
+                homeScore2 = this.poisson(homeExpected2);
+                awayScore2 = this.poisson(awayExpected2);
+                aggregateHome += awayScore2;
+                aggregateAway += homeScore2;
+            }
+            
+            let winner;
+            if (aggregateHome > aggregateAway) {
+                winner = team1;
+            } else if (aggregateAway > aggregateHome) {
+                winner = team2;
+            } else {
+                winner = Math.random() > 0.5 ? team1 : team2;
+            }
+            
+            round.matches.push({
+                team1, team2, 
+                homeScore: homeScore1,
+                awayScore: awayScore1,
+                homeScore2: homeScore2,
+                awayScore2: awayScore2,
+                aggregateHome,
+                aggregateAway,
+                winner,
+                isBye: false, 
+                isPenalty: aggregateHome === aggregateAway,
+                numLegs: numLegs
+            });
+            winners.push(winner);
         }
-
-        const champion = roundTeams[0];
+        
+        bracket.push(round);
         
         return { 
             bracket, 
-            championId: champion ? champion.id : null, 
-            standings 
+            championId: winners.length === 1 ? winners[0].id : null,
+            winners
         };
+    },
+
+    // Versão antiga do simulatePlayoff que gerava todas as fases (não usado mais)
+    async simulatePlayoffOld(teams, stage) {
+        // Código antigo removido - agora cada fase de playoff é um CompetitionStage separado
     },
 
     getTeamsByPosition(stage, position, standings, groups, playoffBracket) {
         if (playoffBracket && playoffBracket.length > 0) {
             if (position === -1) {
+                // Retorna todos os times
                 const allTeams = new Map();
                 playoffBracket.forEach(round => {
                     round.matches.forEach(match => {
@@ -654,36 +606,31 @@ const App = {
             
             const qualified = [];
             
+            // Na nova estrutura, cada playoff stage é uma rodada única
+            // Position 1 = vencedores (avançam)
+            // Position 2+ = perdedores (eliminados)
             if (position === 1) {
-                const finalRound = playoffBracket[playoffBracket.length - 1];
-                if (finalRound.matches?.[0]?.winner && !finalRound.matches[0].winner.isBye) {
-                    qualified.push(finalRound.matches[0].winner);
-                }
-            }
-            else if (position === 2) {
-                const finalRound = playoffBracket[playoffBracket.length - 1];
-                if (finalRound.matches?.[0]) {
-                    const finalMatch = finalRound.matches[0];
-                    const champion = finalMatch.winner;
-                    const runnerUp = champion && champion.id === finalMatch.team1.id ? 
-                        finalMatch.team2 : finalMatch.team1;
-                    if (runnerUp && !runnerUp.isBye) {
-                        qualified.push(runnerUp);
-                    }
-                }
-            }
-            else {
-                const firstRound = playoffBracket[0];
-                if (firstRound?.matches) {
-                    firstRound.matches.forEach(match => {
-                        if (!match.team1.isBye && !qualified.find(q => q.id === match.team1.id)) {
-                            qualified.push(match.team1);
-                        }
-                        if (!match.team2.isBye && !qualified.find(q => q.id === match.team2.id)) {
-                            qualified.push(match.team2);
+                // Retorna todos os vencedores
+                playoffBracket.forEach(round => {
+                    round.matches.forEach(match => {
+                        if (match.winner && !match.winner.isBye && !qualified.find(q => q.id === match.winner.id)) {
+                            qualified.push(match.winner);
                         }
                     });
-                }
+                });
+            }
+            else {
+                // Retorna todos os perdedores
+                playoffBracket.forEach(round => {
+                    round.matches.forEach(match => {
+                        if (!match.isBye && match.winner) {
+                            const loser = match.winner.id === match.team1.id ? match.team2 : match.team1;
+                            if (loser && !loser.isBye && !qualified.find(q => q.id === loser.id)) {
+                                qualified.push(loser);
+                            }
+                        }
+                    });
+                });
             }
             
             return qualified;
@@ -814,9 +761,9 @@ const App = {
             if (club && stats.expectedGoalsFor + stats.expectedGoalsAgainst > 0) {
                 const performanceBonus = (stats.actualGoalsFor - stats.expectedGoalsFor) - 
                                        (stats.actualGoalsAgainst - stats.expectedGoalsAgainst);
-                const approxGames = Math.max(1, (stats.expectedGoalsFor + stats.expectedGoalsAgainst) / 2);
+                const approxGames = Math.max(1, (stats.expectedGoalsFor + stats.expectedGoalsAgainst) / 2.3);
                 const normalizedBonus = performanceBonus / approxGames;
-                club.rating = Math.min(95, Math.max(1, stats.currentRating + normalizedBonus * 1.6));
+                club.rating = Math.min(95, Math.max(1, stats.currentRating + normalizedBonus * 2));
                 stats.currentRating = club.rating;
             }
         });
@@ -853,7 +800,7 @@ const App = {
         const atk = teamRating + (isHome ? F : 0);
         const def = oppRating + (isHome ? 0 : F);
         const diff = atk - def;
-        return Math.max(1.4 + 0.06 * Math.sign(diff) * (Math.abs(diff) ** 1.1), 0.1);
+        return Math.max(1.2 + 0.06 * Math.sign(diff) * (Math.abs(diff) ** 1.2), 0.1);
     },
 
     initializeStandings(teams) {

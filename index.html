@@ -5,94 +5,141 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Simulador de Futebol</title>
     <link rel="stylesheet" href="style.css">
-<link href="https://fonts.googleapis.com/css2?family=Arimo&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Arimo&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;500;700;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
 </head>
 <body>
     <div class="container">
-        <div class="tabs">
-            <button class="tablink active" data-tab="single">Amistoso</button>
-            <button class="tablink" data-tab="season">Simular Temporadas</button>
-        </div>
-        
-        <div id="single" class="tabcontent active">
-            <div class="controls">
-                <div class="select-group">
-                    <label>Time Casa:</label>
-                    <select id="teamHome"></select>
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="header-icon">
+                    <i class="fas fa-futbol"></i>
                 </div>
-                <div class="select-group">
-                    <label>Time Fora:</label>
-                    <select id="teamAway"></select>
+                <div class="header-text">
+                    <h1>Simulador de Futebol</h1>
+                    <p>Simule partidas e temporadas completas</p>
                 </div>
-                <button id="simulateBtn" class="btn btn-primary">
-                    <i class="fas fa-play"></i> Simular Partida
-                </button>
             </div>
+        </header>
+
+        <!-- Navigation Menu -->
+        <nav class="main-nav">
+            <button class="nav-item active" data-tab="single">
+                <i class="fas fa-play-circle"></i>
+                <span>Amistoso</span>
+            </button>
+            <button class="nav-item" data-tab="season">
+                <i class="fas fa-calendar-alt"></i>
+                <span>Temporadas</span>
+            </button>
+        </nav>
+        
+        <!-- Tab: Amistoso -->
+        <div id="single" class="tabcontent active">
+            <div class="section-card">
+                <div class="section-header">
+                    <i class="fas fa-users"></i>
+                    <h2>Configurar Partida</h2>
+                </div>
+                
+                <div class="controls">
+                    <div class="select-group">
+                        <label><i class="fas fa-home"></i> Time Casa:</label>
+                        <select id="teamHome"></select>
+                    </div>
+                    <div class="select-group">
+                        <label><i class="fas fa-plane"></i> Time Fora:</label>
+                        <select id="teamAway"></select>
+                    </div>
+                    <button id="simulateBtn" class="btn btn-primary btn-large">
+                        <i class="fas fa-play"></i> Simular Partida
+                    </button>
+                </div>
+            </div>
+            
             <div id="result" class="result-container"></div>
         </div>
 
+        <!-- Tab: Temporadas -->
         <div id="season" class="tabcontent" style="display: none;">
             <div id="seasonProgress"></div>
             
-            <div class="controls">
-                <div class="select-group">
-                    <label><i class="fas fa-flag"></i> País:</label>
-                    <select id="seasonCountry"></select>
-                </div>
-                <div class="select-group">
-                    <label><i class="fas fa-calendar-alt"></i> Temporadas:</label>
-                    <input type="number" id="numSeasons" min="1" max="100" value="5">
+            <div class="section-card">
+                <div class="section-header">
+                    <i class="fas fa-cog"></i>
+                    <h2>Configurações</h2>
                 </div>
                 
-                <div class="button-group">
-                    <button id="simulateSeasonBtn" class="btn btn-success">
-                        <i class="fas fa-rocket"></i> SIMULAR
-                    </button>
-                    <button id="simulateNextSeasonBtn" class="btn btn-info" style="display: none;">
-                        <i class="fas fa-step-forward"></i> CONTINUAR
-                    </button>
-                </div>
-                
-                <div class="select-group" id="seasonSelector" style="display: none;">
-                    <label><i class="fas fa-eye"></i> Ver Temporada:</label>
-                    <select id="viewSeason"></select>
-                </div>
-                
-                <div class="select-group" id="seasonDivisionSelector" style="display: none;">
-                </div>
-                
-                <div class="select-group" id="competitionSelector" style="display: none;">
-                    <label><i class="fas fa-trophy"></i> Competição:</label>
-                    <select id="viewCompetition"></select>
-                </div>
-                
-                <div class="select-group" id="stageSelector" style="display: none;">
-                    <label><i class="fas fa-chess-board"></i> Fase:</label>
-                    <select id="viewStage"></select>
-                </div>
-                
-                <div class="select-group" id="groupSelector" style="display: none;">
-                    <label><i class="fas fa-users"></i> Grupo:</label>
-                    <div class="group-navigator">
-                        <button class="group-btn" id="groupPrev">
-                            <i class="fas fa-chevron-left"></i>
+                <div class="controls">
+                    <div class="select-group">
+                        <label><i class="fas fa-flag"></i> País:</label>
+                        <select id="seasonCountry"></select>
+                    </div>
+                    <div class="select-group">
+                        <label><i class="fas fa-calendar-alt"></i> Temporadas:</label>
+                        <input type="number" id="numSeasons" min="1" max="100" value="5">
+                    </div>
+                    
+                    <div class="button-group">
+                        <button id="simulateSeasonBtn" class="btn btn-success btn-large">
+                            <i class="fas fa-rocket"></i> SIMULAR
                         </button>
-                        <span class="group-display" id="groupDisplay">Grupo A</span>
-                        <button class="group-btn" id="groupNext">
-                            <i class="fas fa-chevron-right"></i>
+                        <button id="simulateNextSeasonBtn" class="btn btn-info btn-large" style="display: none;">
+                            <i class="fas fa-step-forward"></i> CONTINUAR
                         </button>
                     </div>
                 </div>
-                
-                <div class="select-group" id="roundSelector" style="display: none;">
-                    <label><i class="fas fa-list-ol"></i> Rodada:</label>
-                    <select id="viewRound"></select>
+            </div>
+            
+            <div class="section-card" id="viewSection" style="display: none;">
+                <div class="section-header">
+                    <i class="fas fa-eye"></i>
+                    <h2>Visualizar Resultados</h2>
                 </div>
                 
-                <button id="viewPlayoffBtn" class="btn btn-warning" style="display: none;">
-                    <i class="fas fa-sitemap"></i> Ver Playoff
-                </button>
+                <div class="controls">
+                    <div class="select-group" id="seasonSelector" style="display: none;">
+                        <label><i class="fas fa-eye"></i> Ver Temporada:</label>
+                        <select id="viewSeason"></select>
+                    </div>
+                    
+                    <div class="select-group" id="seasonDivisionSelector" style="display: none;">
+                    </div>
+                    
+                    <div class="select-group" id="competitionSelector" style="display: none;">
+                        <label><i class="fas fa-trophy"></i> Competição:</label>
+                        <select id="viewCompetition"></select>
+                    </div>
+                    
+                    <div class="select-group" id="stageSelector" style="display: none;">
+                        <label><i class="fas fa-chess-board"></i> Fase:</label>
+                        <select id="viewStage"></select>
+                    </div>
+                    
+                    <div class="select-group" id="groupSelector" style="display: none;">
+                        <label><i class="fas fa-users"></i> Grupo:</label>
+                        <div class="group-navigator">
+                            <button class="group-btn" id="groupPrev">
+                                <i class="fas fa-chevron-left"></i>
+                            </button>
+                            <span class="group-display" id="groupDisplay">Grupo A</span>
+                            <button class="group-btn" id="groupNext">
+                                <i class="fas fa-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="select-group" id="roundSelector" style="display: none;">
+                        <label><i class="fas fa-list-ol"></i> Rodada:</label>
+                        <select id="viewRound"></select>
+                    </div>
+                    
+                    <button id="viewPlayoffBtn" class="btn btn-warning" style="display: none;">
+                        <i class="fas fa-sitemap"></i> Ver Playoff
+                    </button>
+                </div>
             </div>
             
             <div id="seasonResults" class="league-results">
@@ -103,9 +150,10 @@
             </div>
         </div>
 
+        <!-- Team Profile Modal -->
         <div id="teamProfile" class="team-profile" style="display: none;">
             <div id="profileContent"></div>
-            <button class="btn btn-danger" onclick="document.getElementById('teamProfile').style.display = 'none'">
+            <button class="btn btn-danger btn-large" onclick="document.getElementById('teamProfile').style.display = 'none'">
                 <i class="fas fa-times"></i> Fechar
             </button>
         </div>
@@ -114,5 +162,32 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="app.js"></script>
+    <script>
+        // Navigation functionality
+        document.querySelectorAll('.nav-item').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const tab = this.dataset.tab;
+                
+                // Update nav items
+                document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                
+                // Update tab content
+                document.querySelectorAll('.tabcontent').forEach(t => {
+                    t.classList.remove('active');
+                    t.style.display = 'none';
+                });
+                
+                const activeTab = document.getElementById(tab);
+                activeTab.classList.add('active');
+                activeTab.style.display = 'block';
+                
+                // Show view section if season tab and results exist
+                if (tab === 'season' && document.getElementById('seasonResults').innerHTML.trim() !== '') {
+                    document.getElementById('viewSection').style.display = 'block';
+                }
+            });
+        });
+    </script>
 </body>
 </html>

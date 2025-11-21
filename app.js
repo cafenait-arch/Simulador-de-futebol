@@ -149,12 +149,22 @@ const App = {
     },
 
     setupTabs() {
-        document.querySelectorAll(".tablink").forEach(tab => {
+        document.querySelectorAll(".nav-item").forEach(tab => {
             tab.addEventListener("click", () => {
-                document.querySelectorAll(".tablink").forEach(t => t.classList.remove("active"));
-                document.querySelectorAll(".tabcontent").forEach(c => c.style.display = "none");
+                document.querySelectorAll(".nav-item").forEach(t => t.classList.remove("active"));
+                document.querySelectorAll(".tabcontent").forEach(c => {
+                    c.style.display = "none";
+                    c.classList.remove("active");
+                });
                 tab.classList.add("active");
-                document.getElementById(tab.dataset.tab).style.display = "block";
+                const targetTab = document.getElementById(tab.dataset.tab);
+                targetTab.style.display = "block";
+                targetTab.classList.add("active");
+                
+                // Show view section if season tab and results exist
+                if (tab.dataset.tab === 'season' && document.getElementById('seasonResults').innerHTML.trim() !== '') {
+                    document.getElementById('viewSection').style.display = 'block';
+                }
             });
         });
     },
@@ -344,8 +354,22 @@ const App = {
         if (stage.stageType === 1) {
             const playoffData = await this.simulatePlayoff(teams, stage);
             stageResult.playoffBracket = playoffData.bracket;
-            stageResult.playoffData = playoffData; // Armazena os dados completos incluindo winners
+            stageResult.playoffData = playoffData;
             stageResult.standings = this.getPlayoffTeamsInOrder(playoffData.bracket, playoffData.winners);
+        }
+        else if (stage.stageType === 2) {
+            // Liga com potes: 4 potes de 9 times, cada time enfrenta 8 adversários do próprio pote
+            stageResult.schedule = this.generatePotLeagueSchedule(teams);
+            this.initializeStandings(teams);
+            
+            for (const roundMatches of stageResult.schedule) {
+                for (const match of roundMatches) {
+                    await this.playMatch(match, stageResult.clubsStats);
+                }
+            }
+            
+            this.sortStandings();
+            stageResult.standings = JSON.parse(JSON.stringify(this.standings));
         }
         else if (stage.numGroups > 1) {
             stageResult.groups = await this.simulateGroupStage(teams, stage);
@@ -726,6 +750,156 @@ const App = {
         }
     },
 
+    generatePotLeagueSchedule(teams) {
+        // Liga com 36 equipes divididas em 4 potes de 9 times cada
+        // Cada time enfrenta 2 adversários de cada um dos outros 3 potes (8 jogos total)
+        
+        const numPots = 4;
+        const teamsPerPot = 9;
+        const opponentsPerPot = 2;
+        
+        // Ordena times por rating e divide em potes
+        const sortedTeams = [...teams].sort((a, b) => b.rating - a.rating);
+        const pots = [];
+        
+        for (let p = 0; p < numPots; p++) {
+            const potTeams = sortedTeams.slice(p * teamsPerPot, (p + 1) * teamsPerPot);
+            pots.push(potTeams.map(t => t.id));
+        }
+        
+        const allMatches = [];
+        const teamFixtures = new Map();
+        
+        // Inicializa fixtures para cada time
+        teams.forEach(team => {
+            teamFixtures.set(team.id, {
+                opponents: [],
+                homeGames: 0,
+                awayGames: 0,
+                potOpponents: [0, 0, 0, 0] // quantos adversários de cada pote
+            });
+        });
+        
+        // Para cada pote, sorteia adversários dos outros potes
+        for (let potIndex = 0; potIndex < numPots; potIndex++) {
+            const currentPot = pots[potIndex];
+            const otherPots = pots.filter((_, index) => index !== potIndex);
+            
+            for (const teamId of currentPot) {
+                const teamFixture = teamFixtures.get(teamId);
+                
+                // Sorteia 2 adversários de cada um dos outros 3 potes
+                for (let otherPotIndex = 0; otherPotIndex < otherPots.length; otherPotIndex++) {
+                    const targetPot = otherPots[otherPotIndex];
+                    const actualPotIndex = pots.indexOf(targetPot);
+                    
+                    // Encontra adversários disponíveis neste pote
+                    const availableOpponents = targetPot.filter(oppId => {
+                        const oppFixture = teamFixtures.get(oppId);
+                        return !teamFixture.opponents.includes(oppId) && 
+                               oppFixture.potOpponents[potIndex] < opponentsPerPot;
+                    });
+                    
+                    // Sorteia 2 adversários deste pote
+                    const shuffled = availableOpponents.sort(() => Math.random() - 0.5);
+                    const selectedOpponents = shuffled.slice(0, opponentsPerPot);
+                    
+                    for (const oppId of selectedOpponents) {
+                        if (!teamFixture.opponents.includes(oppId)) {
+                            // Adiciona adversário
+                            teamFixture.opponents.push(oppId);
+                            teamFixture.potOpponents[actualPotIndex]++;
+                            
+                            // Adiciona reciprocamente
+                            const oppFixture = teamFixtures.get(oppId);
+                            oppFixture.opponents.push(teamId);
+                            oppFixture.potOpponents[potIndex]++;
+                            
+                            // Decide mando de campo (4 casa, 4 fora para cada time)
+                            const teamHomeCount = teamFixture.homeGames;
+                            const teamAwayCount = teamFixture.awayGames;
+                            const oppHomeCount = oppFixture.homeGames;
+                            const oppAwayCount = oppFixture.awayGames;
+                            
+                            let isTeamHome;
+                            if (teamHomeCount < 4 && oppAwayCount < 4) {
+                                if (teamAwayCount >= 4 || oppHomeCount >= 4) {
+                                    isTeamHome = true;
+                                } else {
+                                    isTeamHome = Math.random() < 0.5;
+                                }
+                            } else {
+                                isTeamHome = false;
+                            }
+                            
+                            const match = {
+                                home: isTeamHome ? teamId : oppId,
+                                away: isTeamHome ? oppId : teamId,
+                                homeScore: 0,
+                                awayScore: 0,
+                                played: false,
+                                round: 0
+                            };
+                            
+                            allMatches.push(match);
+                            
+                            // Atualiza contadores de mando
+                            if (isTeamHome) {
+                                teamFixture.homeGames++;
+                                oppFixture.awayGames++;
+                            } else {
+                                teamFixture.awayGames++;
+                                oppFixture.homeGames++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Remove duplicatas (já que adicionamos jogos bidirecionalmente)
+        const uniqueMatches = [];
+        const processedPairs = new Set();
+        
+        for (const match of allMatches) {
+            const pairKey = [match.home, match.away].sort().join('-');
+            if (!processedPairs.has(pairKey)) {
+                processedPairs.add(pairKey);
+                uniqueMatches.push(match);
+            }
+        }
+        
+        // Distribui os jogos em rodadas
+        const schedule = [];
+        let round = 1;
+        const remainingMatches = [...uniqueMatches];
+        
+        while (remainingMatches.length > 0) {
+            const roundMatches = [];
+            const teamsInRound = new Set();
+            
+            for (let i = remainingMatches.length - 1; i >= 0; i--) {
+                const match = remainingMatches[i];
+                if (!teamsInRound.has(match.home) && !teamsInRound.has(match.away)) {
+                    match.round = round;
+                    roundMatches.push(match);
+                    teamsInRound.add(match.home);
+                    teamsInRound.add(match.away);
+                    remainingMatches.splice(i, 1);
+                }
+            }
+            
+            if (roundMatches.length > 0) {
+                schedule.push(roundMatches);
+                round++;
+            } else {
+                break;
+            }
+        }
+        
+        return schedule;
+    },
+
     generateLeagueSchedule(teams, numRounds) {
         const teamIds = teams.map(t => t.id);
         if (teamIds.length % 2 !== 0) teamIds.push("BYE");
@@ -763,7 +937,7 @@ const App = {
                                        (stats.actualGoalsAgainst - stats.expectedGoalsAgainst);
                 const approxGames = Math.max(1, (stats.expectedGoalsFor + stats.expectedGoalsAgainst) / 2.3);
                 const normalizedBonus = performanceBonus / approxGames;
-                club.rating = Math.min(95, Math.max(1, stats.currentRating + normalizedBonus * 2));
+                club.rating = Math.min(95, Math.max(1, stats.currentRating + normalizedBonus * 1.8));
                 stats.currentRating = club.rating;
             }
         });
@@ -1416,6 +1590,7 @@ resetContinentalQualifications() {
         
         seasonSelector.disabled = this.seasonHistory.length === 0; 
         document.getElementById("seasonSelector").style.display = this.seasonHistory.length > 0 ? 'block' : 'none';
+        document.getElementById("viewSection").style.display = this.seasonHistory.length > 0 ? 'block' : 'none';
     },
 
     viewSeason(seasonNumber = null) {
@@ -1793,18 +1968,16 @@ getRelevantTransitions() {
     
     const relevantTransitions = [];
     
-    // Encontrar as posições mais altas (promoção) e mais baixas (rebaixamento)
+    // Coletar posições específicas para cada tipo
     const promotionPlaces = [];
     const relegationPlaces = [];
-    const type106Places = []; // Para transições type 106
+    const type106Places = [];
     
     transitions.forEach(transition => {
         if (transition.place > 0) {
             if (transition.type === 106) {
-                // Transição type 106 - DarkRed
                 type106Places.push(transition.place);
             } else if (transition.type === 0) {
-                // Transição type 0 - lógica original
                 const targetStage = this.competitionStages.find(s => s.id === transition.stageIdTo);
                 if (targetStage) {
                     const targetCompetitionIds = targetStage.competitionId.split(',').map(id => id.trim());
@@ -1813,14 +1986,13 @@ getRelevantTransitions() {
                     let isPromotion = false;
                     let isRelegation = false;
                     
-                    // Verificar cada competição de destino
                     targetCompetitionIds.forEach(targetCompId => {
                         const targetCompetition = this.competitions.find(c => c.id === targetCompId);
                         if (targetCompetition) {
                             if (targetCompetition.importanceOrder < currentCompetition.importanceOrder) {
-                                isPromotion = true; // Vai para competição mais importante
+                                isPromotion = true;
                             } else if (targetCompetition.importanceOrder > currentCompetition.importanceOrder) {
-                                isRelegation = true; // Vai para competição menos importante
+                                isRelegation = true;
                             }
                         }
                     });
@@ -1835,38 +2007,56 @@ getRelevantTransitions() {
         }
     });
     
+    // Criar ranges contíguos para cada tipo
+    const createContiguousRanges = (places) => {
+        if (places.length === 0) return [];
+        const sorted = [...places].sort((a, b) => a - b);
+        const ranges = [];
+        let rangeStart = sorted[0];
+        let rangeEnd = sorted[0];
+        
+        for (let i = 1; i < sorted.length; i++) {
+            if (sorted[i] === rangeEnd + 1) {
+                rangeEnd = sorted[i];
+            } else {
+                ranges.push({ start: rangeStart, end: rangeEnd });
+                rangeStart = sorted[i];
+                rangeEnd = sorted[i];
+            }
+        }
+        ranges.push({ start: rangeStart, end: rangeEnd });
+        return ranges;
+    };
+    
     // Criar faixas para promoções (verde)
-    if (promotionPlaces.length > 0) {
-        const minPromotion = Math.min(...promotionPlaces);
-        const maxPromotion = Math.max(...promotionPlaces);
+    const promotionRanges = createContiguousRanges(promotionPlaces);
+    promotionRanges.forEach(range => {
         relevantTransitions.push({
-            type: 1, // promoção
-            placeStart: minPromotion,
-            placeEnd: maxPromotion
+            type: 1,
+            placeStart: range.start,
+            placeEnd: range.end
         });
-    }
+    });
     
     // Criar faixas para rebaixamentos (vermelho)
-    if (relegationPlaces.length > 0) {
-        const minRelegation = Math.min(...relegationPlaces);
-        const maxRelegation = Math.max(...relegationPlaces);
+    const relegationRanges = createContiguousRanges(relegationPlaces);
+    relegationRanges.forEach(range => {
         relevantTransitions.push({
-            type: 2, // rebaixamento
-            placeStart: minRelegation,
-            placeEnd: maxRelegation
+            type: 2,
+            placeStart: range.start,
+            placeEnd: range.end
         });
-    }
+    });
     
     // Criar faixas para type 106 (DarkRed)
-    if (type106Places.length > 0) {
-        const minType106 = Math.min(...type106Places);
-        const maxType106 = Math.max(...type106Places);
+    const type106Ranges = createContiguousRanges(type106Places);
+    type106Ranges.forEach(range => {
         relevantTransitions.push({
-            type: 106, // type 106
-            placeStart: minType106,
-            placeEnd: maxType106
+            type: 106,
+            placeStart: range.start,
+            placeEnd: range.end
         });
-    }
+    });
     
     return relevantTransitions;
 },

@@ -284,6 +284,7 @@ button i {
 .standings-container {
     max-height: 310px;
     overflow-y: auto;
+    overflow-x: auto;
     background: white;
     border-radius: 6px;
     border: 1px solid #e5e7eb;
@@ -292,6 +293,7 @@ button i {
 /* Table */
 .standings-table {
     width: 100%;
+    min-width: 600px;
     border-collapse: collapse;
 }
 
@@ -308,8 +310,7 @@ button i {
 }
 
 .standings-table td {
-    padding: 2px;
-    font-size: 10.5px;
+    padding: 0.5px;
 }
 
 .standings-table tr:nth-child(even) {
@@ -349,7 +350,7 @@ button i {
 }
 
 .standings-table td.type106 {
-    background-color: #7c3aed !important;
+    background-color: darkred !important;
     color: white;
     font-weight: 600;
 }
@@ -365,17 +366,11 @@ button i {
     display: grid;
     grid-template-columns: 1fr 70px 1fr;
     align-items: center;
-    gap: 8px;
     font-weight: 600;
-    padding: 2px;
-    background: white;
-    border-radius: 4px;
-    margin-bottom: 4px;
-    border: 1px solid #e5e7eb;
 }
 
 .match {
-    padding: 2px;
+    padding: 1px;
 }
 
 .team-home {
@@ -459,6 +454,41 @@ button i {
 
 ::-webkit-scrollbar-thumb:hover {
     background: #6b7280;
+}
+
+/* Form Badges */
+.form-badge {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 14px;
+    font-size: 5px;
+    font-weight: 700;
+    margin: 0 1px;
+}
+
+.form-win {
+    background-color: #059669;
+    color: white;
+}
+
+.form-loss {
+    background-color: #dc2626;
+    color: white;
+}
+
+.form-draw {
+    background-color: #9ca3af;
+    color: white;
+}
+
+.standings-table th:last-child,
+.standings-table td:last-child {
+    min-width: 50px;
+    max-width: none;
+    white-space: nowrap;
 }
 
 /* Mobile Optimizations */

@@ -937,7 +937,7 @@ const App = {
                                        (stats.actualGoalsAgainst - stats.expectedGoalsAgainst);
                 const approxGames = Math.max(1, (stats.expectedGoalsFor + stats.expectedGoalsAgainst) / 2.3);
                 const normalizedBonus = performanceBonus / approxGames;
-                club.rating = Math.min(95, Math.max(1, stats.currentRating + normalizedBonus * 1.8));
+                club.rating = Math.min(95, Math.max(1, stats.currentRating + normalizedBonus * 1.6));
                 stats.currentRating = club.rating;
             }
         });
@@ -1493,8 +1493,8 @@ resetContinentalQualifications() {
             });
             
             const numSeasons = parseInt(document.getElementById("numSeasons").value); 
-            if (numSeasons < 1 || numSeasons > 100) {
-                alert("Número de temporadas inválido. Use entre 1 e 100.");
+            if (numSeasons < 1 || numSeasons > 1000) {
+                alert("Número de temporadas inválido. Use entre 1 e 1000.");
                 return;
             }
             
@@ -1528,7 +1528,7 @@ resetContinentalQualifications() {
                 progressContainer.textContent = `Temporada ${season}/${numSeasons} completa — ${percent}%`;
                 progressContainer.style.backgroundColor = season % 2 === 0 ? "#e8f5e8" : "#f0f0f0";
                 
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 10));
             }
             
             this.updateSeasonSelects();
@@ -1763,7 +1763,16 @@ resetContinentalQualifications() {
     async viewRound() { 
         const round = parseInt(document.getElementById("viewRound").value); 
         if (!round) return; 
+        await this.displayStandingsUpToRound(round);
         await this.displayRoundMatches(round, "seasonMatches"); 
+    },
+    
+    async displayStandingsUpToRound(round) {
+        if (this.currentGroups.length > 0) {
+            await this.displayGroupStandingsUpToRound(round);
+        } else {
+            await this.displayLeagueStandingsUpToRound(round);
+        }
     },
 
     changeDivision(direction) {
@@ -1840,18 +1849,33 @@ resetContinentalQualifications() {
     },
 
 async displayLeagueStandings(container) {
+    await this.displayLeagueStandingsUpToRound(null, container);
+},
+
+async displayLeagueStandingsUpToRound(upToRound = null, containerElement = null) {
+    const container = containerElement || document.getElementById("seasonStandings");
+    if (!container) return;
+    
+    container.innerHTML = '';
+    
+    let standingsToShow = this.standings;
+    
+    if (upToRound !== null && this.schedule && this.schedule.length >= upToRound) {
+        standingsToShow = this.calculateStandingsUpToRound(upToRound);
+    }
+    
     const table = document.createElement("table");
     table.className = "standings-table";
     table.innerHTML = `
         <tr>
             <th>#</th><th>Time</th><th>J</th><th>V</th><th>E</th><th>D</th>
-            <th>GP</th><th>GC</th><th>SG</th><th>Pts</th>
+            <th>GP</th><th>GC</th><th>SG</th><th>Pts</th><th>Forma</th>
         </tr>
     `;
     
     const transitions = this.getRelevantTransitions();
     
-    const rows = await Promise.all(this.standings.map(async (team, index) => {
+    const rows = await Promise.all(standingsToShow.map(async (team, index) => {
         const logo = await this.loadLogo(team.id);
         const tr = document.createElement("tr");
         tr.style.cursor = "pointer";
@@ -1872,6 +1896,8 @@ async displayLeagueStandings(container) {
             }
         });
         
+        const forma = this.getTeamForm(team.id, upToRound);
+        
         tr.innerHTML = `
 <td class="${positionClass}">${position}</td><td>${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${team.name}" class="logo"></div>` : ''}<span style="margin-left:10px">${team.name}</span></td>
             <td>${team.played}</td>
@@ -1882,6 +1908,7 @@ async displayLeagueStandings(container) {
             <td>${team.goalsAgainst}</td>
             <td>${team.goalDifference}</td>
             <td><strong>${team.points}</strong></td>
+            <td>${forma}</td>
         `;
         return tr;
     }));
@@ -1890,11 +1917,125 @@ async displayLeagueStandings(container) {
     container.appendChild(table);
 },
 
+calculateStandingsUpToRound(round) {
+    const tempStandings = {};
+    
+    this.standings.forEach(team => {
+        tempStandings[team.id] = {
+            id: team.id,
+            name: team.name,
+            played: 0,
+            won: 0,
+            drawn: 0,
+            lost: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+            goalDifference: 0,
+            points: 0
+        };
+    });
+    
+    for (let i = 0; i < round && i < this.schedule.length; i++) {
+        const roundMatches = this.schedule[i];
+        roundMatches.forEach(match => {
+            if (!match.played) return;
+            
+            const homeTeam = tempStandings[match.home];
+            const awayTeam = tempStandings[match.away];
+            
+            if (homeTeam && awayTeam) {
+                homeTeam.played++;
+                awayTeam.played++;
+                homeTeam.goalsFor += match.homeScore;
+                homeTeam.goalsAgainst += match.awayScore;
+                awayTeam.goalsFor += match.awayScore;
+                awayTeam.goalsAgainst += match.homeScore;
+                
+                if (match.homeScore > match.awayScore) {
+                    homeTeam.won++;
+                    homeTeam.points += 3;
+                    awayTeam.lost++;
+                } else if (match.homeScore < match.awayScore) {
+                    awayTeam.won++;
+                    awayTeam.points += 3;
+                    homeTeam.lost++;
+                } else {
+                    homeTeam.drawn++;
+                    awayTeam.drawn++;
+                    homeTeam.points++;
+                    awayTeam.points++;
+                }
+                
+                homeTeam.goalDifference = homeTeam.goalsFor - homeTeam.goalsAgainst;
+                awayTeam.goalDifference = awayTeam.goalsFor - awayTeam.goalsAgainst;
+            }
+        });
+    }
+    
+    return Object.values(tempStandings).sort((a, b) => {
+        if (b.points !== a.points) return b.points - a.points;
+        if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
+        if (b.goalsFor !== a.goalsFor) return b.goalsFor - a.goalsFor;
+        return a.name.localeCompare(b.name);
+    });
+},
+
+getTeamForm(teamId, upToRound = null) {
+    if (!this.schedule || this.schedule.length === 0) return '';
+    
+    const maxRound = upToRound || this.schedule.length;
+    const results = [];
+    
+    for (let i = 0; i < maxRound && i < this.schedule.length; i++) {
+        const roundMatches = this.schedule[i];
+        const match = roundMatches.find(m => m.home === teamId || m.away === teamId);
+        
+        if (match && match.played) {
+            const isHome = match.home === teamId;
+            const teamScore = isHome ? match.homeScore : match.awayScore;
+            const opponentScore = isHome ? match.awayScore : match.homeScore;
+            
+            if (teamScore > opponentScore) {
+                results.push('V');
+            } else if (teamScore < opponentScore) {
+                results.push('D');
+            } else {
+                results.push('E');
+            }
+        }
+    }
+    
+    const last5 = results.slice(-5);
+    
+    return last5.map(result => {
+        if (result === 'V') {
+            return '<span class="form-badge form-win">V</span>';
+        } else if (result === 'D') {
+            return '<span class="form-badge form-loss">D</span>';
+        } else {
+            return '<span class="form-badge form-draw">E</span>';
+        }
+    }).join('');
+},
+
 async displayGroupStandings(container) {
-    if (this.currentGroups.length === 0) return;
+    await this.displayGroupStandingsUpToRound(null, container);
+},
+
+async displayGroupStandingsUpToRound(upToRound = null, containerElement = null) {
+    const container = containerElement || document.getElementById("seasonStandings");
+    if (!container || this.currentGroups.length === 0) return;
+    
+    container.innerHTML = '';
     
     const currentGroup = this.currentGroups[this.currentGroupIndex];
     if (!currentGroup || !currentGroup.standings) return;
+    
+    let standingsToShow = currentGroup.standings;
+    
+    if (upToRound !== null && currentGroup.schedule && currentGroup.schedule.length >= upToRound) {
+        standingsToShow = this.calculateGroupStandingsUpToRound(currentGroup, upToRound);
+    }
     
     const groupHeader = document.createElement("h3");
     groupHeader.textContent = `Grupo ${currentGroup.id}`;
@@ -1907,14 +2048,14 @@ async displayGroupStandings(container) {
     table.innerHTML = `
         <tr>
             <th>#</th><th>Time</th><th>J</th><th>V</th><th>E</th><th>D</th>
-            <th>GP</th><th>GC</th><th>SG</th><th>Pts</th>
+            <th>GP</th><th>GC</th><th>SG</th><th>Pts</th><th>Forma</th>
         </tr>
     `;
     
     const numQualified = this.currentStage?.stage?.numberOfClassifieds || 0;
     const transitions = this.getRelevantTransitions();
     
-    const rows = await Promise.all(currentGroup.standings.map(async (team, index) => {
+    const rows = await Promise.all(standingsToShow.map(async (team, index) => {
         const logo = await this.loadLogo(team.id);
         const tr = document.createElement("tr");
         tr.style.cursor = "pointer";
@@ -1923,7 +2064,6 @@ async displayGroupStandings(container) {
         const position = index + 1;
         let positionClass = "";
         
-        // Primeiro verifica as transições específicas
         transitions.forEach(transition => {
             if (position >= transition.placeStart && position <= transition.placeEnd) {
                 if (transition.type === 1) {
@@ -1936,10 +2076,11 @@ async displayGroupStandings(container) {
             }
         });
         
-        // Se não houver transição específica, verifica a classificação padrão do grupo
         if (!positionClass && position <= numQualified) {
             positionClass = "promoted";
         }
+        
+        const forma = this.getGroupTeamForm(currentGroup, team.id, upToRound);
         
         tr.innerHTML = `
 <td class="${positionClass}">${position}</td><td>${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${team.name}" class="logo"></div>` : ''}<span style="margin-left:10px">${team.name}</span></td>
@@ -1951,12 +2092,114 @@ async displayGroupStandings(container) {
             <td>${team.goalsAgainst}</td>
             <td>${team.goalDifference}</td>
             <td><strong>${team.points}</strong></td>
+            <td>${forma}</td>
         `;
         return tr;
     }));
     
     rows.forEach(r => table.appendChild(r));
     container.appendChild(table);
+},
+
+calculateGroupStandingsUpToRound(group, round) {
+    const tempStandings = {};
+    
+    group.standings.forEach(team => {
+        tempStandings[team.id] = {
+            id: team.id,
+            name: team.name,
+            played: 0,
+            won: 0,
+            drawn: 0,
+            lost: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+            goalDifference: 0,
+            points: 0
+        };
+    });
+    
+    for (let i = 0; i < round && i < group.schedule.length; i++) {
+        const roundMatches = group.schedule[i];
+        roundMatches.forEach(match => {
+            if (!match.played) return;
+            
+            const homeTeam = tempStandings[match.home];
+            const awayTeam = tempStandings[match.away];
+            
+            if (homeTeam && awayTeam) {
+                homeTeam.played++;
+                awayTeam.played++;
+                homeTeam.goalsFor += match.homeScore;
+                homeTeam.goalsAgainst += match.awayScore;
+                awayTeam.goalsFor += match.awayScore;
+                awayTeam.goalsAgainst += match.homeScore;
+                
+                if (match.homeScore > match.awayScore) {
+                    homeTeam.won++;
+                    homeTeam.points += 3;
+                    awayTeam.lost++;
+                } else if (match.homeScore < match.awayScore) {
+                    awayTeam.won++;
+                    awayTeam.points += 3;
+                    homeTeam.lost++;
+                } else {
+                    homeTeam.drawn++;
+                    awayTeam.drawn++;
+                    homeTeam.points++;
+                    awayTeam.points++;
+                }
+                
+                homeTeam.goalDifference = homeTeam.goalsFor - homeTeam.goalsAgainst;
+                awayTeam.goalDifference = awayTeam.goalsFor - awayTeam.goalsAgainst;
+            }
+        });
+    }
+    
+    return Object.values(tempStandings).sort((a, b) => {
+        if (b.points !== a.points) return b.points - a.points;
+        if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
+        if (b.goalsFor !== a.goalsFor) return b.goalsFor - a.goalsFor;
+        return a.name.localeCompare(b.name);
+    });
+},
+
+getGroupTeamForm(group, teamId, upToRound = null) {
+    if (!group.schedule || group.schedule.length === 0) return '';
+    
+    const maxRound = upToRound || group.schedule.length;
+    const results = [];
+    
+    for (let i = 0; i < maxRound && i < group.schedule.length; i++) {
+        const roundMatches = group.schedule[i];
+        const match = roundMatches.find(m => m.home === teamId || m.away === teamId);
+        
+        if (match && match.played) {
+            const isHome = match.home === teamId;
+            const teamScore = isHome ? match.homeScore : match.awayScore;
+            const opponentScore = isHome ? match.awayScore : match.homeScore;
+            
+            if (teamScore > opponentScore) {
+                results.push('V');
+            } else if (teamScore < opponentScore) {
+                results.push('D');
+            } else {
+                results.push('E');
+            }
+        }
+    }
+    
+    const last5 = results.slice(-5);
+    
+    return last5.map(result => {
+        if (result === 'V') {
+            return '<span class="form-badge form-win">V</span>';
+        } else if (result === 'D') {
+            return '<span class="form-badge form-loss">D</span>';
+        } else {
+            return '<span class="form-badge form-draw">E</span>';
+        }
+    }).join('');
 },
 
 getRelevantTransitions() {

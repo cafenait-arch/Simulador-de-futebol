@@ -4,14 +4,14 @@
     padding: 0;
     box-sizing: border-box;
     border: none;
-    font-family: 'arimo', sans-serif;
+    font-family: 'google sans flex', sans-serif;
 }
 
 /* Base */
 body {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: #222;
-    font-size: 11px;
+    font-size: 10px;
     min-height: 100vh;
     padding: 8px;
 }
@@ -293,7 +293,7 @@ button i {
 /* Table */
 .standings-table {
     width: 100%;
-    min-width: 600px;
+    min-width: 400px;
     border-collapse: collapse;
 }
 
@@ -461,7 +461,7 @@ button i {
     display: inline-block;
     width: 14px;
     height: 14px;
-    border-radius: 50%;
+    border-radius: 25%;
     text-align: center;
     line-height: 14px;
     font-size: 5px;

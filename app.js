@@ -929,19 +929,31 @@ const App = {
         return schedule;
     },
 
-    updateRatingsFromStats(clubsStats) {
-        clubsStats.forEach(stats => {
-            const club = this.getClub(stats.id);
-            if (club && stats.expectedGoalsFor + stats.expectedGoalsAgainst > 0) {
-                const performanceBonus = (stats.actualGoalsFor - stats.expectedGoalsFor) - 
-                                       (stats.actualGoalsAgainst - stats.expectedGoalsAgainst);
-                const approxGames = Math.max(1, (stats.expectedGoalsFor + stats.expectedGoalsAgainst) / 2.3);
-                const normalizedBonus = performanceBonus / approxGames;
-                club.rating = Math.min(95, Math.max(1, stats.currentRating + normalizedBonus * 1.6));
-                stats.currentRating = club.rating;
-            }
-        });
-    },
+updateRatingsFromStats(clubsStats) {
+    clubsStats.forEach(stats => {
+        const club = this.getClub(stats.id);
+        if (club && stats.expectedGoalsFor + stats.expectedGoalsAgainst > 0) {
+            
+            const performanceBonus = (stats.actualGoalsFor - stats.expectedGoalsFor) -
+                (stats.actualGoalsAgainst - stats.expectedGoalsAgainst);
+            
+            const approxGames = Math.max(1, (stats.expectedGoalsFor + stats.expectedGoalsAgainst) / 2.3);
+            
+            const normalizedBonus = performanceBonus / approxGames;
+            
+            // aleatoriedade simétrica
+            const randomFactor = (Math.random() * 2 - 1); // -1 a +1
+            
+            club.rating = Math.min(
+                95,
+                Math.max(
+                    1,
+                    stats.currentRating + normalizedBonus * 1.6 + randomFactor * 0.8
+                )
+            );
+        }
+    });
+},
 
     getClub(id) { 
         return this.clubs.find(c => c.id === id); 

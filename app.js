@@ -1,9 +1,33 @@
 const App = {
     clubs: [], countries: [], competitions: [], competitionStages: [], competitionStageClubs: [],
-    competitionStageTransitions: [], zipData: null, logoCache: new Map(), teamTitles: new Map(),
+    competitionStageTransitions: [], competitionStageAwards: [], zipData: null, logoCache: new Map(), teamTitles: new Map(),
+    players: [], playerFicticiousNames: [], playerStats: [], // Novas tabelas
     seasonHistory: [], currentSeason: 0, currentCompetition: null, currentStage: null,
     standings: [], schedule: [], playoffBracket: [], 
     currentGroups: [], currentGroupIndex: 0, currentDivisions: [], currentDivisionIndex: 0,
+    
+    // Formações disponíveis para os times
+    formations: {
+        '4-3-3': { positions: [1, 3, 4, 4, 2, 6, 5, 8, 9, 7, 9] }, // GOL, LE, ZG, ZG, LD, VL, VL, MO, AT, PD, PE (ajustar roles)
+        '4-4-2': { positions: [1, 3, 4, 4, 2, 7, 6, 5, 8, 9, 9] },
+        '3-5-2': { positions: [1, 4, 4, 4, 6, 7, 5, 8, 6, 9, 9] },
+        '4-2-3-1': { positions: [1, 3, 4, 4, 2, 6, 5, 8, 7, 8, 9] },
+        '5-3-2': { positions: [1, 3, 4, 4, 4, 2, 6, 5, 8, 9, 9] },
+        '4-1-4-1': { positions: [1, 3, 4, 4, 2, 6, 7, 5, 5, 8, 9] }
+    },
+    
+    // Mapeamento de roles
+    roleMap: {
+        1: { name: 'GOL', category: 'goalkeeper', factor: 0.4 },
+        2: { name: 'LD', category: 'defense', factor: 0.8 },
+        3: { name: 'LE', category: 'defense', factor: 0.8 },
+        4: { name: 'ZG', category: 'defense', factor: 0.8 },
+        5: { name: 'VL', category: 'midfield', factor: 1.0 },
+        6: { name: 'PE', category: 'midfield', factor: 1.0 },
+        7: { name: 'PD', category: 'attack', factor: 1.2 },
+        8: { name: 'MO', category: 'midfield', factor: 1.0 },
+        9: { name: 'AT', category: 'attack', factor: 1.2 }
+    },
 
     async loadDB() {
         await this.loadZip("Pack.zip");
@@ -20,56 +44,93 @@ const App = {
             name 
         })).filter(c => c.id != null);
         
-        this.competitions = getTable("Competition").map(([id, countryId, name, type, importanceOrder, recurring, startMonth]) => ({
-            id: id != null ? id.toString() : null, 
-            countryId: countryId != null ? countryId.toString() : null, 
-            name, 
-            type: +type, 
-            importanceOrder: +importanceOrder, 
-            recurring: +recurring, 
-            startMonth: +startMonth
-        })).filter(c => c.id != null);
-        
-        this.clubs = getTable("Club").map(([id, name, rating, countryId, bTeamOf]) => ({
-            id: id != null ? id.toString() : null, 
-            name, 
-            rating: +rating, 
-            countryId: countryId != null ? countryId.toString() : null, 
-            originalRating: +rating, 
-            bTeamOf: bTeamOf ? bTeamOf.toString() : null,
-            competitions: [],
-            stages: [],
-            originalCompetitions: [],
-            originalStages: []
-        })).filter(c => c.id != null);
-        
-        this.competitionStages = getTable("CompetitionStage").map(([id, competitionId, name, startingWeek, stageType, numLegs, numRounds, isLastStage, numGroups, allowByeTeamsOnDraw, numberOfTeams, duration, isWinnerDecisionStage]) => ({
-            id: id != null ? id.toString() : null, 
-            competitionId: competitionId != null ? competitionId.toString() : null,
-            name, 
-            startingWeek: +startingWeek,
-            stageType: +stageType, 
-            numLegs: +numLegs, 
-            numRounds: +numRounds, 
-            isLastStage: +isLastStage,
-            numGroups: +numGroups, 
-            allowByeTeamsOnDraw: +allowByeTeamsOnDraw, 
-            numberOfTeams: +numberOfTeams, 
-            duration: +duration, 
-            isWinnerDecisionStage: +isWinnerDecisionStage
-        })).filter(s => s.id != null && s.competitionId != null);
-        
-        this.competitionStageClubs = getTable("CompetitionStageClub").map(([clubId, stageId]) => ({
-            clubId: clubId != null ? clubId.toString() : null, 
-            stageId: stageId != null ? stageId.toString() : null
-        })).filter(c => c.clubId != null && c.stageId != null);
-        
-        this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([stageIdFrom, stageIdTo, place, type]) => ({
-            stageIdFrom: stageIdFrom != null ? stageIdFrom.toString() : null, 
-            stageIdTo: stageIdTo != null ? stageIdTo.toString() : null, 
-            place: +place, 
-            type: +type
-        })).filter(t => t.stageIdFrom != null && t.stageIdTo != null);
+this.competitions = getTable("Competition").map(([id, countryId, name, type, importanceOrder]) => ({
+    id: id != null ? id.toString() : null, 
+    countryId: countryId != null ? countryId.toString() : null, 
+    name, 
+    type: +type, 
+    importanceOrder: +importanceOrder
+})).filter(c => c.id != null);
+
+this.clubs = getTable("Club").map(row => {
+    const [id, name, rating, countryId, bTeamOf, transferBalance, youth] = row;
+    return {
+        id: id != null ? id.toString() : null, 
+        name, 
+        rating: +rating, 
+        countryId: countryId != null ? countryId.toString() : null, 
+        originalRating: +rating, 
+        bTeamOf: bTeamOf ? bTeamOf.toString() : null,
+        transferBalance: transferBalance != null ? +transferBalance : 5000000, // Dinheiro inicial padrão
+        youth: youth != null ? Math.min(20, Math.max(1, +youth)) : 10, // Youth 1-20, padrão 10
+        competitions: [],
+        stages: [],
+        originalCompetitions: [],
+        originalStages: []
+    };
+}).filter(c => c.id != null);
+
+// Carregar CompetitionStageAwards
+try {
+    this.competitionStageAwards = getTable("CompetitionStageAwards").map(([stageId, place, award]) => ({
+        stageId: stageId != null ? stageId.toString() : null,
+        place: +place,
+        award: +award
+    })).filter(a => a.stageId != null);
+} catch(e) { this.competitionStageAwards = []; }
+
+// Carregar Players
+try {
+    this.players = getTable("Player").map(([id, name, rating, ratingPotential, clubId, countryId, role, dob]) => ({
+        id: id != null ? id.toString() : null,
+        name,
+        rating: +rating,
+        ratingPotential: +ratingPotential,
+        clubId: clubId != null ? clubId.toString() : null,
+        countryId: countryId != null ? countryId.toString() : null,
+        role: +role,
+        dob: +dob, // Ano de nascimento
+        retired: false
+    })).filter(p => p.id != null);
+} catch(e) { this.players = []; }
+
+// Carregar PlayerFicticiousName
+try {
+    this.playerFicticiousNames = getTable("PlayerFicticiousName").map(([countryId, name, firstName, weight]) => ({
+        countryId: countryId != null ? countryId.toString() : null,
+        name,
+        firstName: +firstName, // 0 = nome, 1 = sobrenome
+        weight: +weight
+    })).filter(n => n.countryId != null);
+} catch(e) { this.playerFicticiousNames = []; }
+
+// Inicializar estatísticas de jogadores
+this.playerStats = [];
+
+this.competitionStages = getTable("CompetitionStage").map(([id, competitionId, name, startingWeek, stageType, numLegs, numRounds,numGroups,isWinnerDecisionStage]) => ({
+    id: id != null ? id.toString() : null, 
+    competitionId: competitionId != null ? competitionId.toString() : null,
+    name, 
+    startingWeek: +startingWeek,
+    stageType: +stageType, 
+    numLegs: +numLegs, 
+    numRounds: +numRounds, 
+    numGroups: +numGroups, 
+    isWinnerDecisionStage: +isWinnerDecisionStage
+})).filter(s => s.id != null && s.competitionId != null);
+
+this.competitionStageClubs = getTable("CompetitionStageClub").map(([clubId, stageId]) => ({
+    clubId: clubId != null ? clubId.toString() : null, 
+    stageId: stageId != null ? stageId.toString() : null
+})).filter(c => c.clubId != null && c.stageId != null);
+
+this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([stageIdFrom, stageIdTo, place, type]) => ({
+    stageIdFrom: stageIdFrom != null ? stageIdFrom.toString() : null, 
+    stageIdTo: stageIdTo != null ? stageIdTo.toString() : null, 
+    place: +place, 
+    type: +type
+})).filter(t => t.stageIdFrom != null && t.stageIdTo != null);
+
 
         this.clubs.forEach(club => {
             const stageClubs = this.competitionStageClubs.filter(csc => csc.clubId === club.id);
@@ -144,7 +205,8 @@ const App = {
             { id: "groupNext", event: "click", fn: () => this.changeGroup(1) },
             { id: "divisionUp", event: "click", fn: () => this.changeDivision(-1) },
             { id: "divisionDown", event: "click", fn: () => this.changeDivision(1) },
-            { id: "viewPlayoffBtn", event: "click", fn: () => this.togglePlayoffView() }
+            { id: "viewPlayoffBtn", event: "click", fn: () => this.togglePlayoffView() },
+            { id: "viewTransfersBtn", event: "click", fn: () => this.toggleTransfersView() }
         ].forEach(({ id, event, fn }) => document.getElementById(id)?.addEventListener(event, fn));
     },
 
@@ -257,7 +319,6 @@ const App = {
                             currentTeams.push(team);
                         }
                     });
-                    console.log("[Playoff Auto-Advance]", stage.id, "→", nextPlayoffStage.id, "winners:", stageResult.playoffData.winners.map(w => w.name));
                 }
             }
             
@@ -308,7 +369,7 @@ const App = {
             }
             
             if (stage.isWinnerDecisionStage) {
-                if (stage.stageType === 0 || stage.stageType === 2) {
+                if (stage.stageType === 0 || stage.stageType === 2 || stage.stageType === 3) {
                     competitionResult.championId = stageResult.standings?.[0]?.id || null;
                 } else if (stage.stageType === 1 && stageResult.playoffBracket) {
                     const finalRound = stageResult.playoffBracket[stageResult.playoffBracket.length - 1];
@@ -370,6 +431,11 @@ const App = {
             
             this.sortStandings();
             stageResult.standings = JSON.parse(JSON.stringify(this.standings));
+        }
+        else if (stage.stageType === 3) {
+            // Grupos onde times jogam contra todos os times dos OUTROS grupos
+            stageResult.groups = await this.simulateCrossGroupStage(teams, stage);
+            stageResult.standings = this.consolidateGroupStandings(stageResult.groups);
         }
         else if (stage.numGroups > 1) {
             stageResult.groups = await this.simulateGroupStage(teams, stage);
@@ -514,6 +580,130 @@ const App = {
         return groups;
     },
 
+    async simulateCrossGroupStage(teams, stage) {
+        // stageType 3: Times jogam contra todos os times dos OUTROS grupos
+        const groups = [];
+        const numGroups = stage.numGroups || 2;
+        const teamsPerGroup = Math.floor(teams.length / numGroups);
+        const numRounds = stage.numRounds || 1;
+        
+        const shuffledTeams = [...teams].sort(() => Math.random() - 0.5);
+        
+        // Primeiro, distribui os times em grupos
+        const groupTeamsMap = [];
+        for (let g = 0; g < numGroups; g++) {
+            const groupTeams = shuffledTeams.slice(g * teamsPerGroup, (g + 1) * teamsPerGroup);
+            groupTeamsMap.push({
+                id: String.fromCharCode(65 + g),
+                teams: groupTeams
+            });
+        }
+        
+        // Para cada grupo, gera jogos contra times de OUTROS grupos
+        for (let g = 0; g < numGroups; g++) {
+            const groupTeams = groupTeamsMap[g].teams;
+            const groupId = groupTeamsMap[g].id;
+            
+            // Coleta todos os times dos outros grupos
+            const opponentTeams = [];
+            for (let og = 0; og < numGroups; og++) {
+                if (og !== g) {
+                    opponentTeams.push(...groupTeamsMap[og].teams);
+                }
+            }
+            
+            const group = {
+                id: groupId,
+                teams: groupTeams,
+                standings: [],
+                schedule: this.generateCrossGroupSchedule(groupTeams, opponentTeams, numRounds),
+                isCrossGroup: true
+            };
+            
+            this.initializeStandings(groupTeams);
+            
+            for (const roundMatches of group.schedule) {
+                for (const match of roundMatches) {
+                    const homeClub = this.getClub(match.home);
+                    const awayClub = this.getClub(match.away);
+                    if (!homeClub || !awayClub) continue;
+                    
+                    const homeExpected = this.calcExpectedGoals(homeClub.rating, awayClub.rating, true);
+                    const awayExpected = this.calcExpectedGoals(awayClub.rating, homeClub.rating, false);
+                    const homeScore = this.poisson(homeExpected);
+                    const awayScore = this.poisson(awayExpected);
+                    
+                    Object.assign(match, { homeScore, awayScore, played: true });
+                    this.updateStandings(homeClub.id, awayClub.id, homeScore, awayScore, homeExpected, awayExpected);
+                }
+            }
+            
+            this.sortStandings();
+            group.standings = JSON.parse(JSON.stringify(this.standings));
+            groups.push(group);
+        }
+        
+        return groups;
+    },
+
+    generateCrossGroupSchedule(groupTeams, opponentTeams, numRounds) {
+        // Cada time do grupo joga contra todos os times adversários
+        const allMatches = [];
+        
+        for (const team of groupTeams) {
+            for (const opponent of opponentTeams) {
+                for (let r = 0; r < numRounds; r++) {
+                    // Alterna mando de campo nas rodadas
+                    const isHome = r % 2 === 0;
+                    allMatches.push({
+                        home: isHome ? team.id : opponent.id,
+                        away: isHome ? opponent.id : team.id,
+                        homeScore: 0,
+                        awayScore: 0,
+                        played: false,
+                        round: 0,
+                        groupTeam: team.id, // Marca qual time é do grupo
+                        opponentGroup: this.findTeamGroup ? this.findTeamGroup(opponent.id) : null
+                    });
+                }
+            }
+        }
+        
+        // Distribui os jogos em rodadas
+        const schedule = [];
+        let round = 1;
+        const remainingMatches = [...allMatches];
+        
+        while (remainingMatches.length > 0) {
+            const roundMatches = [];
+            const teamsInRound = new Set();
+            
+            for (let i = remainingMatches.length - 1; i >= 0; i--) {
+                const match = remainingMatches[i];
+                if (!teamsInRound.has(match.home) && !teamsInRound.has(match.away)) {
+                    match.round = round;
+                    roundMatches.push(match);
+                    teamsInRound.add(match.home);
+                    teamsInRound.add(match.away);
+                    remainingMatches.splice(i, 1);
+                }
+            }
+            
+            if (roundMatches.length > 0) {
+                schedule.push(roundMatches);
+                round++;
+            } else {
+                // Evita loop infinito
+                if (remainingMatches.length > 0) {
+                    schedule.push(remainingMatches.splice(0));
+                }
+                break;
+            }
+        }
+        
+        return schedule;
+    },
+
     async simulatePlayoff(teams, stage) {
         const numLegs = stage.numLegs || 1;
         const bracket = [];
@@ -630,11 +820,11 @@ const App = {
             
             const qualified = [];
             
-            // Na nova estrutura, cada playoff stage é uma rodada única
-            // Position 1 = vencedores (avançam)
-            // Position 2+ = perdedores (eliminados)
+            // Em cada fase de playoff (rodada única por stage):
+            // Position 1 = vencedores (avançam para próxima fase)
+            // Position 2 = perdedores (eliminados ou vão para outra transição)
             if (position === 1) {
-                // Retorna todos os vencedores
+                // Retorna todos os vencedores desta fase
                 playoffBracket.forEach(round => {
                     round.matches.forEach(match => {
                         if (match.winner && !match.winner.isBye && !qualified.find(q => q.id === match.winner.id)) {
@@ -643,8 +833,8 @@ const App = {
                     });
                 });
             }
-            else {
-                // Retorna todos os perdedores
+            else if (position === 2) {
+                // Retorna todos os perdedores desta fase
                 playoffBracket.forEach(round => {
                     round.matches.forEach(match => {
                         if (!match.isBye && match.winner) {
@@ -656,6 +846,7 @@ const App = {
                     });
                 });
             }
+            // Para position > 2, não há mais classificações em playoff (apenas 1º e 2º)
             
             return qualified;
         }
@@ -724,29 +915,61 @@ const App = {
         const awayClub = this.getClub(match.away);
         if (!homeClub || !awayClub) return;
         
-        const homeExpected = this.calcExpectedGoals(homeClub.rating, awayClub.rating, true);
-        const awayExpected = this.calcExpectedGoals(awayClub.rating, homeClub.rating, false);
+        // Novo sistema: escalar jogadores
+        const homeLineupData = this.selectLineup(homeClub.id);
+        const awayLineupData = this.selectLineup(awayClub.id);
+        
+        const homeLineup = homeLineupData.lineup;
+        const awayLineup = awayLineupData.lineup;
+        
+        // Registrar jogos para cada jogador
+        homeLineup.forEach(p => this.addPlayerGame(p.id));
+        awayLineup.forEach(p => this.addPlayerGame(p.id));
+        
+        // Calcular stats do time baseado nos jogadores escalados
+        const homeStats = this.calculateTeamStats(homeClub.id, homeLineup);
+        const awayStats = this.calculateTeamStats(awayClub.id, awayLineup);
+        
+        // Novo calcExpectedGoals usando ataque+meio vs defesa+goleiro
+        const homeExpected = this.calcExpectedGoalsNew(homeStats, awayStats, true);
+        const awayExpected = this.calcExpectedGoalsNew(awayStats, homeStats, false);
+        
         const homeScore = this.poisson(homeExpected);
         const awayScore = this.poisson(awayExpected);
         
-        Object.assign(match, { homeScore, awayScore, played: true });
+        // Simular quem marcou os gols
+        const homeScorers = this.simulateGoalScorers(homeLineup, homeScore);
+        const awayScorers = this.simulateGoalScorers(awayLineup, awayScore);
+        
+        Object.assign(match, { 
+            homeScore, 
+            awayScore, 
+            played: true,
+            homeLineup: homeLineup.map(p => ({ id: p.id, name: p.name, role: p.role })),
+            awayLineup: awayLineup.map(p => ({ id: p.id, name: p.name, role: p.role })),
+            homeFormation: homeLineupData.formation,
+            awayFormation: awayLineupData.formation,
+            homeScorers: homeScorers.map(p => ({ id: p.id, name: p.name })),
+            awayScorers: awayScorers.map(p => ({ id: p.id, name: p.name }))
+        });
+        
         this.updateStandings(homeClub.id, awayClub.id, homeScore, awayScore, homeExpected, awayExpected);
         
-        const homeStats = clubsStats.find(s => s.id === match.home);
-        const awayStats = clubsStats.find(s => s.id === match.away);
-        if (homeStats) {
-            homeStats.expectedGoalsFor += homeExpected;
-            homeStats.expectedGoalsAgainst += awayExpected;
-            homeStats.actualGoalsFor += homeScore;
-            homeStats.actualGoalsAgainst += awayScore;
-            if (awayScore === 0) homeStats.cleanSheets++;
+        const homeClubStats = clubsStats.find(s => s.id === match.home);
+        const awayClubStats = clubsStats.find(s => s.id === match.away);
+        if (homeClubStats) {
+            homeClubStats.expectedGoalsFor += homeExpected;
+            homeClubStats.expectedGoalsAgainst += awayExpected;
+            homeClubStats.actualGoalsFor += homeScore;
+            homeClubStats.actualGoalsAgainst += awayScore;
+            if (awayScore === 0) homeClubStats.cleanSheets++;
         }
-        if (awayStats) {
-            awayStats.expectedGoalsFor += awayExpected;
-            awayStats.expectedGoalsAgainst += homeExpected;
-            awayStats.actualGoalsFor += awayScore;
-            awayStats.actualGoalsAgainst += homeScore;
-            if (homeScore === 0) awayStats.cleanSheets++;
+        if (awayClubStats) {
+            awayClubStats.expectedGoalsFor += awayExpected;
+            awayClubStats.expectedGoalsAgainst += homeExpected;
+            awayClubStats.actualGoalsFor += awayScore;
+            awayClubStats.actualGoalsAgainst += homeScore;
+            if (homeScore === 0) awayClubStats.cleanSheets++;
         }
     },
 
@@ -929,28 +1152,787 @@ const App = {
         return schedule;
     },
 
+// Removido sistema de atualização de rating dos times - agora baseado em jogadores
 updateRatingsFromStats(clubsStats) {
-    clubsStats.forEach(stats => {
-        const club = this.getClub(stats.id);
-        if (club && stats.expectedGoalsFor + stats.expectedGoalsAgainst > 0) {
+    // Sistema removido conforme solicitado
+    // O rating dos times será calculado com base nos jogadores escalados
+},
+
+// Calcular rating do time baseado nos jogadores escalados
+calculateTeamRating(clubId, lineup) {
+    if (!lineup || lineup.length === 0) {
+        const club = this.getClub(clubId);
+        return club ? club.rating : 50;
+    }
+    
+    let totalRating = 0;
+    lineup.forEach(player => {
+        let rating = player.rating;
+        // Penalidade se jogador está fora de posição
+        if (player.positionMismatch) {
+            rating -= 5;
+        }
+        totalRating += rating;
+    });
+    
+    return totalRating / lineup.length;
+},
+
+// Calcular ataque/defesa do time
+calculateTeamStats(clubId, lineup) {
+    const defaultStats = { attack: 50, defense: 50, midfield: 50, goalkeeper: 50 };
+    if (!lineup || lineup.length === 0) return defaultStats;
+    
+    const stats = { attack: [], defense: [], midfield: [], goalkeeper: [] };
+    
+    lineup.forEach(player => {
+        const roleInfo = this.roleMap[player.role];
+        if (roleInfo) {
+            let rating = player.rating;
+            if (player.positionMismatch) rating -= 5;
+            stats[roleInfo.category].push(rating);
+        }
+    });
+    
+    return {
+        attack: stats.attack.length > 0 ? stats.attack.reduce((a,b) => a+b, 0) / stats.attack.length : 50,
+        defense: stats.defense.length > 0 ? stats.defense.reduce((a,b) => a+b, 0) / stats.defense.length : 50,
+        midfield: stats.midfield.length > 0 ? stats.midfield.reduce((a,b) => a+b, 0) / stats.midfield.length : 50,
+        goalkeeper: stats.goalkeeper.length > 0 ? stats.goalkeeper[0] : 50
+    };
+},
+
+// Novo calcExpectedGoals baseado em ataque/meio e defesa/goleiro
+calcExpectedGoalsNew(teamStats, oppStats, isHome = false) {
+    const F = 4.5;
+    const atk = (teamStats.attack + teamStats.midfield) / 2 + (isHome ? F : 0);
+    const def = (oppStats.defense + oppStats.goalkeeper) / 2 + (isHome ? 0 : F);
+    const diff = atk - def;
+    return Math.max(1.2 + 0.02 * Math.sign(diff) * (Math.abs(diff) ** 1.2), 0.1);
+},
+
+// Escalar time - escolhe melhores jogadores para formação
+selectLineup(clubId) {
+    const clubPlayers = this.players.filter(p => p.clubId === clubId && !p.retired);
+    
+    if (clubPlayers.length < 11) {
+        // Gerar jogadores fictícios se necessário
+        this.generateFicticiousPlayers(clubId, 16 - clubPlayers.length);
+    }
+    
+    const availablePlayers = this.players.filter(p => p.clubId === clubId && !p.retired);
+    
+    // Escolher formação aleatória
+    const formationKeys = Object.keys(this.formations);
+    const formationKey = formationKeys[Math.floor(Math.random() * formationKeys.length)];
+    const formation = this.formations[formationKey];
+    
+    const lineup = [];
+    const usedPlayers = new Set();
+    
+    // Para cada posição da formação, encontrar melhor jogador
+    formation.positions.forEach((requiredRole, index) => {
+        // Primeiro tenta jogador na posição correta
+        let bestPlayer = null;
+        let bestRating = -1;
+        let positionMismatch = false;
+        
+        availablePlayers.forEach(player => {
+            if (usedPlayers.has(player.id)) return;
             
-            const performanceBonus = (stats.actualGoalsFor - stats.expectedGoalsFor) -
-                (stats.actualGoalsAgainst - stats.expectedGoalsAgainst);
+            if (player.role === requiredRole && player.rating > bestRating) {
+                bestPlayer = player;
+                bestRating = player.rating;
+                positionMismatch = false;
+            }
+        });
+        
+        // Se não achou, pega qualquer jogador disponível
+        if (!bestPlayer) {
+            availablePlayers.forEach(player => {
+                if (usedPlayers.has(player.id)) return;
+                if (player.rating > bestRating) {
+                    bestPlayer = player;
+                    bestRating = player.rating;
+                    positionMismatch = true;
+                }
+            });
+        }
+        
+        if (bestPlayer) {
+            usedPlayers.add(bestPlayer.id);
+            lineup.push({ ...bestPlayer, positionMismatch, lineupRole: requiredRole });
+        }
+    });
+    
+    return { lineup, formation: formationKey };
+},
+
+// Gerar jogadores fictícios com distribuição mínima e rating baseado no rating do time
+generateFicticiousPlayers(clubId, count) {
+    const club = this.getClub(clubId);
+    if (!club) return;
+    
+    const countryNames = this.playerFicticiousNames.filter(n => n.countryId === club.countryId);
+    const firstNames = countryNames.filter(n => n.firstName === 0);
+    const lastNames = countryNames.filter(n => n.firstName === 1);
+    
+    // Se não houver nomes, usar nomes genéricos
+    const defaultFirstNames = ['João', 'Pedro', 'Lucas', 'Gabriel', 'Carlos', 'André', 'Rafael', 'Bruno', 'Thiago', 'Felipe'];
+    const defaultLastNames = ['Silva', 'Santos', 'Oliveira', 'Souza', 'Pereira', 'Costa', 'Ferreira', 'Rodrigues', 'Almeida', 'Lima'];
+    
+    // Distribuição mínima de posições: 1 GOL, 2 LE, 2 LD, 2 VL, 5 MO, 2 PE, 2 PD, 2 AT = 18 jogadores
+    const minPositions = {
+        1: 2,  // GOL
+        2: 3,  // LD
+        3: 3,  // LE
+        4: 3, // ZG
+        5: 3,  // VL
+        6: 3,  // PE
+        7: 3,  // PD
+        8: 6,  // MO
+        9: 4   // AT
+    };
+    
+    // Verificar jogadores existentes no clube
+    const existingPlayers = this.players.filter(p => p.clubId === clubId && !p.retired);
+    const existingByRole = {};
+    existingPlayers.forEach(p => {
+        existingByRole[p.role] = (existingByRole[p.role] || 0) + 1;
+    });
+    
+    // Calcular quantos faltam para atingir o mínimo de cada posição
+    const neededPositions = [];
+    Object.entries(minPositions).forEach(([role, min]) => {
+        const roleNum = parseInt(role);
+        const existing = existingByRole[roleNum] || 0;
+        const needed = Math.max(0, min - existing);
+        for (let i = 0; i < needed; i++) {
+            neededPositions.push(roleNum);
+        }
+    });
+    
+    // Se count for maior que as posições necessárias, completar com posições aleatórias
+    const totalNeeded = Math.max(count, neededPositions.length);
+    const rolesToGenerate = [...neededPositions];
+    
+    // Adicionar posições extras aleatórias se necessário
+    const allRoles = [1, 2, 3, 5, 6, 7, 8, 9];
+    while (rolesToGenerate.length < totalNeeded) {
+        rolesToGenerate.push(allRoles[Math.floor(Math.random() * allRoles.length)]);
+    }
+    
+    for (let i = 0; i < totalNeeded; i++) {
+        // Escolher nome baseado em peso
+        let firstName, lastName;
+        
+        if (firstNames.length > 0) {
+            firstName = this.weightedRandomSelect(firstNames);
+        } else {
+            firstName = defaultFirstNames[Math.floor(Math.random() * defaultFirstNames.length)];
+        }
+        
+        if (lastNames.length > 0) {
+            lastName = this.weightedRandomSelect(lastNames);
+        } else {
+            lastName = defaultLastNames[Math.floor(Math.random() * defaultLastNames.length)];
+        }
+        
+        const fullName = `${firstName} ${lastName}`;
+        
+        // NOVO: Calcular rating baseado no rating do time (club.rating)
+        // Rating do jogador varia entre -15 e +5 do rating do time, com distribuição normal
+        const teamRating = club.rating || 50;
+        const variation = (Math.random() + Math.random() + Math.random()) / 3; // Distribuição mais centralizada
+        const ratingOffset = -15 + variation * 20; // Range de -15 a +5
+        const baseRating = teamRating + ratingOffset;
+        
+        // Aplicar bônus de Youth (pequeno ajuste)
+        const youthBonus = (club.youth / 20) * 5; // 0-5 de bônus
+        const rating = Math.min(95, Math.max(30, baseRating + youthBonus * Math.random()));
+        
+        // Potencial baseado no rating e Youth
+        const potentialBonus = (club.youth / 20) * 15;
+        const ratingPotential = Math.min(99, rating + 3 + Math.random() * (8 + potentialBonus));
+        
+        // Posição definida pela distribuição mínima
+        const role = rolesToGenerate[i];
+        
+        // Idade entre 17 e 35
+        const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+        const age = 17 + Math.floor(Math.random() * 18);
+        const dob = currentYear - age;
+        
+        const newPlayer = {
+            id: `gen_${clubId}_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 5)}`,
+            name: fullName,
+            rating: Math.round(rating),
+            ratingPotential: Math.round(ratingPotential),
+            clubId: clubId,
+            countryId: club.countryId,
+            role: role,
+            dob: dob,
+            retired: false
+        };
+        
+        this.players.push(newPlayer);
+    }
+},
+
+// Seleção ponderada por peso
+weightedRandomSelect(items) {
+    const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
+    let random = Math.random() * totalWeight;
+    
+    for (const item of items) {
+        random -= item.weight;
+        if (random <= 0) return item.name;
+    }
+    
+    return items[0].name;
+},
+
+// Simular quem marcou os gols
+simulateGoalScorers(lineup, goals) {
+    if (goals === 0 || lineup.length === 0) return [];
+    
+    const scorers = [];
+    
+    // Calcular peso de cada jogador para marcar gol
+    const weights = lineup.map(player => {
+        const roleInfo = this.roleMap[player.role] || { factor: 1.0 };
+        let rating = player.rating;
+        if (player.positionMismatch) rating -= 5;
+        return { player, weight: rating * roleInfo.factor };
+    });
+    
+    // Para cada gol, sortear marcador baseado em poisson individual
+    for (let g = 0; g < goals; g++) {
+        let maxPoisson = -1;
+        let scorer = null;
+        
+        weights.forEach(({ player, weight }) => {
+            const lambda = weight / 100; // Normalizar para poisson
+            const poissonValue = this.poisson(lambda) + Math.random(); // Adicionar aleatoriedade
+            if (poissonValue > maxPoisson) {
+                maxPoisson = poissonValue;
+                scorer = player;
+            }
+        });
+        
+        if (scorer) {
+            scorers.push(scorer);
+            // Atualizar estatísticas do jogador
+            this.addPlayerGoal(scorer.id);
+        }
+    }
+    
+    return scorers;
+},
+
+// Adicionar gol às estatísticas do jogador
+addPlayerGoal(playerId) {
+    const currentYear = this.seasonHistory.length + 1;
+    let stat = this.playerStats.find(s => s.playerId === playerId && s.year === currentYear);
+    
+    if (!stat) {
+        const player = this.players.find(p => p.id === playerId);
+        stat = {
+            playerId,
+            year: currentYear,
+            clubId: player ? player.clubId : null,
+            goals: 0,
+            games: 0
+        };
+        this.playerStats.push(stat);
+    }
+    
+    stat.goals++;
+},
+
+// Adicionar jogo às estatísticas do jogador
+addPlayerGame(playerId) {
+    const currentYear = this.seasonHistory.length + 1;
+    let stat = this.playerStats.find(s => s.playerId === playerId && s.year === currentYear);
+    
+    if (!stat) {
+        const player = this.players.find(p => p.id === playerId);
+        stat = {
+            playerId,
+            year: currentYear,
+            clubId: player ? player.clubId : null,
+            goals: 0,
+            games: 0
+        };
+        this.playerStats.push(stat);
+    }
+    
+    stat.games++;
+},
+
+// Evoluir jogadores no final da temporada
+evolvePlayersEndOfSeason() {
+    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+    
+    this.players.forEach(player => {
+        if (player.retired) return;
+        
+        const age = currentYear - player.dob;
+        
+        // Aposentadoria
+        if (age >= 33) {
+            const retireChance = (age - 32) * 0.1; // 10% aos 33, 20% aos 34, etc.
+            if (Math.random() < retireChance) {
+                player.retired = true;
+                return;
+            }
             
-            const approxGames = Math.max(1, (stats.expectedGoalsFor + stats.expectedGoalsAgainst) / 2.3);
-            
-            const normalizedBonus = performanceBonus / approxGames;
-            
-            // aleatoriedade simétrica
-            const randomFactor = (Math.random() * 2 - 1); // -1 a +1
-            
-            club.rating = Math.min(
-                95,
-                Math.max(
-                    1,
-                    stats.currentRating + normalizedBonus * 1.6 + randomFactor * 0.8
-                )
+            // Perda de rating após 33
+            const ratingLoss = (age - 32) * 0.5 * Math.random();
+            player.rating = Math.max(20, player.rating - ratingLoss);
+        }
+        
+        // Evolução até o potencial
+        if (player.rating < player.ratingPotential && age < 30) {
+            const growthFactor = age < 23 ? 3 : (age < 27 ? 2 : 1);
+            const maxGrowth = (player.ratingPotential - player.rating) * 0.2;
+            const growth = Math.random() * growthFactor * maxGrowth / 3;
+            player.rating = Math.min(player.ratingPotential, player.rating + growth);
+        }
+    });
+},
+
+// ============= SISTEMA DE CONTRATAÇÕES =============
+
+// Executar janela de transferências
+runTransferWindow() {
+    console.log("=== JANELA DE TRANSFERÊNCIAS ===");
+    
+    // Criar lista de jogadores disponíveis para transferência
+    const transferList = this.createTransferList();
+    
+    // Cada time analisa suas necessidades e tenta contratar
+    const shuffledClubs = [...this.clubs].sort(() => Math.random() - 0.5);
+    
+    shuffledClubs.forEach(club => {
+        this.processClubTransfers(club, transferList);
+    });
+    
+    console.log("=== FIM DA JANELA DE TRANSFERÊNCIAS ===");
+},
+
+// Criar lista de jogadores disponíveis para transferência
+createTransferList() {
+    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+    const transferList = [];
+    
+    this.players.forEach(player => {
+        if (player.retired) return;
+        
+        const age = currentYear - player.dob;
+        const club = this.getClub(player.clubId);
+        if (!club) return;
+        
+        // Jogadores têm chance de querer sair baseado em fatores
+        const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
+        const avgRating = clubPlayers.reduce((sum, p) => sum + p.rating, 0) / clubPlayers.length;
+        
+        // Jogadores muito melhores que a média do time querem sair
+        const ratingDiff = player.rating - avgRating;
+        let wantsToLeave = false;
+        
+        if (ratingDiff > 15) {
+            wantsToLeave = Math.random() < 0.6; // 60% chance
+        } else if (ratingDiff > 10) {
+            wantsToLeave = Math.random() < 0.3; // 30% chance
+        } else if (ratingDiff > 5) {
+            wantsToLeave = Math.random() < 0.1; // 10% chance
+        }
+        
+        // Jogadores velhos têm menos chance de transferência
+        if (age > 32) {
+            wantsToLeave = wantsToLeave && Math.random() < 0.3;
+        }
+        
+        // Jogadores jovens com alto potencial podem querer sair
+        if (age < 23 && player.ratingPotential > player.rating + 10) {
+            wantsToLeave = wantsToLeave || Math.random() < 0.2;
+        }
+        
+        if (wantsToLeave) {
+            const value = this.calcPlayerValue(player);
+            transferList.push({
+                player,
+                value,
+                age,
+                sellingClub: club
+            });
+        }
+    });
+    
+    return transferList;
+},
+
+// Processar transferências de um clube
+processClubTransfers(club, transferList) {
+    const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
+    
+    // Analisar necessidades do time
+    const needs = this.analyzeTeamNeeds(club, clubPlayers);
+    
+    // Budget disponível para transferências (50-80% do saldo)
+    const transferBudget = club.transferBalance * (0.5 + Math.random() * 0.3);
+    let remainingBudget = transferBudget;
+    
+    // Ordenar necessidades por prioridade
+    const prioritizedNeeds = Object.entries(needs)
+        .filter(([role, data]) => data.priority > 0)
+        .sort((a, b) => b[1].priority - a[1].priority);
+    
+    // Tentar contratar para cada necessidade
+    for (const [role, needData] of prioritizedNeeds) {
+        if (remainingBudget < 100000) break; // Mínimo para contratar
+        
+        const roleNum = parseInt(role);
+        const targetPlayer = this.findBestTransferTarget(
+            club, 
+            roleNum, 
+            needData, 
+            transferList, 
+            remainingBudget
+        );
+        
+        if (targetPlayer) {
+            const success = this.executeTransfer(
+                targetPlayer.player,
+                targetPlayer.sellingClub,
+                club,
+                targetPlayer.value
             );
+            
+            if (success) {
+                remainingBudget -= targetPlayer.value;
+                // Remover jogador da lista de transferências
+                const idx = transferList.findIndex(t => t.player.id === targetPlayer.player.id);
+                if (idx !== -1) transferList.splice(idx, 1);
+            }
+        }
+    }
+},
+
+// Analisar necessidades do time
+analyzeTeamNeeds(club, clubPlayers) {
+    const needs = {};
+    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+    
+    // Inicializar necessidades para cada posição
+    Object.keys(this.roleMap).forEach(role => {
+        needs[role] = {
+            count: 0,
+            avgRating: 0,
+            priority: 0,
+            minRating: 0,
+            hasYoungTalent: false
+        };
+    });
+    
+    // Contar jogadores por posição e calcular médias
+    clubPlayers.forEach(player => {
+        const role = player.role;
+        const age = currentYear - player.dob;
+        
+        if (needs[role]) {
+            needs[role].count++;
+            needs[role].avgRating += player.rating;
+            if (age < 25 && player.ratingPotential > player.rating + 5) {
+                needs[role].hasYoungTalent = true;
+            }
+        }
+    });
+    
+    // Calcular média e prioridades
+    const clubAvgRating = clubPlayers.reduce((sum, p) => sum + p.rating, 0) / clubPlayers.length;
+    
+    Object.keys(needs).forEach(role => {
+        const need = needs[role];
+        if (need.count > 0) {
+            need.avgRating = need.avgRating / need.count;
+        } else {
+            need.avgRating = 0;
+        }
+        
+        // Definir quantidade ideal por posição
+        const idealCount = {
+            1: 2,  // GOL
+            2: 2,  // LD
+            3: 2,  // LE
+            4: 4,  // ZG
+            5: 2,  // VL
+            6: 2,  // PE
+            7: 2,  // PD
+            8: 2,  // MO
+            9: 3   // AT
+        };
+        
+        const ideal = idealCount[role] || 2;
+        
+        // Calcular prioridade
+        // 1. Falta de jogadores na posição = alta prioridade
+        if (need.count < ideal) {
+            need.priority += (ideal - need.count) * 30;
+        }
+        
+        // 2. Rating baixo na posição = média prioridade
+        if (need.avgRating < clubAvgRating - 5 && need.count > 0) {
+            need.priority += 20;
+        }
+        
+        // 3. Falta de talento jovem = baixa prioridade
+        if (!need.hasYoungTalent && need.count >= ideal) {
+            need.priority += 10;
+        }
+        
+        // Rating mínimo desejado para contratação
+        need.minRating = Math.max(40, clubAvgRating - 10);
+    });
+    
+    return needs;
+},
+
+// Encontrar melhor alvo de transferência
+findBestTransferTarget(club, role, needData, transferList, budget) {
+    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+    const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
+    const clubAvgRating = clubPlayers.reduce((sum, p) => sum + p.rating, 0) / clubPlayers.length;
+    
+    // Filtrar candidatos
+    const candidates = transferList.filter(t => {
+        // Mesma posição
+        if (t.player.role !== role) return false;
+        
+        // Não pode comprar do próprio time
+        if (t.sellingClub.id === club.id) return false;
+        
+        // Dentro do orçamento
+        if (t.value > budget) return false;
+        
+        // Rating mínimo
+        if (t.player.rating < needData.minRating) return false;
+        
+        // Não contratar jogador muito pior que a média
+        if (t.player.rating < clubAvgRating - 15) return false;
+        
+        return true;
+    });
+    
+    if (candidates.length === 0) return null;
+    
+    // Pontuar candidatos
+    candidates.forEach(c => {
+        const age = currentYear - c.player.dob;
+        let score = 0;
+        
+        // Rating do jogador
+        score += c.player.rating * 2;
+        
+        // Potencial (mais importante para jovens)
+        if (age < 25) {
+            score += (c.player.ratingPotential - c.player.rating) * 1.5;
+        }
+        
+        // Idade ideal (23-28)
+        if (age >= 23 && age <= 28) {
+            score += 20;
+        } else if (age < 23) {
+            score += 15;
+        } else if (age <= 31) {
+            score += 10;
+        }
+        
+        // Custo-benefício
+        const valuePerRating = c.value / c.player.rating;
+        score -= valuePerRating / 100000;
+        
+        // Se o time precisa de talento jovem e o candidato é jovem com potencial
+        if (!needData.hasYoungTalent && age < 23 && c.player.ratingPotential > c.player.rating + 8) {
+            score += 30;
+        }
+        
+        c.score = score;
+    });
+    
+    // Ordenar por score e retornar melhor
+    candidates.sort((a, b) => b.score - a.score);
+    
+    // Chance de contratar baseada na diferença de rating
+    const best = candidates[0];
+    if (best) {
+        const ratingDiff = best.player.rating - clubAvgRating;
+        let chanceToSign = 0.8; // 80% base
+        
+        // Jogador muito melhor pode não querer ir para time pior
+        if (ratingDiff > 10) {
+            chanceToSign -= (ratingDiff - 10) * 0.05;
+        }
+        
+        // Time rico tem mais chance de convencer
+        if (club.transferBalance > best.value * 3) {
+            chanceToSign += 0.1;
+        }
+        
+        if (Math.random() < chanceToSign) {
+            return best;
+        }
+    }
+    
+    return null;
+},
+
+// Executar transferência
+executeTransfer(player, sellingClub, buyingClub, value) {
+    // Verificar se o time vendedor ainda tem jogadores suficientes
+    const sellerPlayers = this.players.filter(p => 
+        p.clubId === sellingClub.id && !p.retired && p.id !== player.id
+    );
+    
+    // Contar quantos jogadores na mesma posição o vendedor terá
+    const samePositionPlayers = sellerPlayers.filter(p => p.role === player.role);
+    
+    // Não vender se ficar com menos de 1 na posição (exceto se tiver muitos)
+    if (samePositionPlayers.length < 1) {
+        return false;
+    }
+    
+    // Não vender se ficar com menos de 16 jogadores
+    if (sellerPlayers.length < 16) {
+        return false;
+    }
+    
+    // Verificar se o comprador pode pagar
+    if (buyingClub.transferBalance < value) {
+        return false;
+    }
+    
+    // Executar transferência
+    const oldClub = sellingClub.name;
+    player.clubId = buyingClub.id;
+    
+    // Atualizar saldos
+    buyingClub.transferBalance -= value;
+    sellingClub.transferBalance += value;
+    
+    
+    // Registrar transferência nas estatísticas do jogador
+    const currentYear = this.seasonHistory.length + 1;
+    this.playerStats.push({
+        playerId: player.id,
+        year: currentYear,
+        clubId: buyingClub.id,
+        goals: 0,
+        games: 0,
+        isTransfer: true,
+        fromClub: sellingClub.id,
+        transferValue: value
+    });
+    
+    return true;
+},
+
+// Gerar relatório de transferências
+getTransferReport() {
+    const currentYear = this.seasonHistory.length + 1;
+    const transfers = this.playerStats.filter(s => s.year === currentYear && s.isTransfer);
+    
+    return transfers.map(t => {
+        const player = this.players.find(p => p.id === t.playerId);
+        const fromClub = this.getClub(t.fromClub);
+        const toClub = this.getClub(t.clubId);
+        
+        return {
+            player: player?.name || 'Desconhecido',
+            from: fromClub?.name || 'Desconhecido',
+            to: toClub?.name || 'Desconhecido',
+            value: this.formatValue(t.transferValue || 0)
+        };
+    });
+},
+
+// Calcular valor de mercado do jogador
+calcPlayerValue(player) {
+    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+    const age = currentYear - player.dob;
+    
+    const a = 3.4;
+    const b = 0.188;
+    let base = a * Math.exp(b * player.rating);
+    
+    // Correção de rating baixo (igual ao original)
+    const m_rating = Math.pow(player.rating / 90, 2);
+    base *= m_rating;
+    
+    const m_pot = 1 + (player.ratingPotential - player.rating) / 40;
+    
+    let m_idade;
+    if (age <= 20) m_idade = 1.8;
+    else if (age <= 23) m_idade = 1.5;
+    else if (age <= 26) m_idade = 1.2;
+    else if (age <= 29) m_idade = 1.0;
+    else if (age <= 33) m_idade = 0.7;
+    else if (age <= 36) m_idade = 0.4;
+    else if (age <= 39) m_idade = 0.2;
+    else if (age <= 42) m_idade = 0.1;
+    else if (age <= 44) m_idade = 0.05;
+    else m_idade = 0.2; // ✅ IGUAL ao código antigo
+    
+    // Posições por número (mantido)
+    const pos_mult = {
+        1: 0.7,
+        4: 0.8,
+        2: 0.9,
+        3: 0.9,
+        5: 0.9,
+        6: 0.9,
+        8: 1.0,
+        7: 1.1,
+        9: 1.2
+    };
+    
+    const m_pos = pos_mult[player.role] || 1.0;
+    
+    return base * m_pot * m_idade * m_pos; // ✅ SEM multiplicador final
+},
+
+// Formatar valor
+formatValue(valor) {
+    if (valor >= 1000000) return "€" + (valor / 1000000).toFixed(2) + "M";
+    if (valor >= 1000) return "€" + (valor / 1000).toFixed(1) + "K";
+    return "€" + valor.toFixed(0);
+},
+
+// Revelar jogadores da academia juvenil no início da temporada
+revealYouthPlayers() {
+    this.clubs.forEach(club => {
+        // Chance de revelar jogador baseada no Youth
+        const revealChance = club.youth / 100; // 1% a 20%
+        
+        if (Math.random() < revealChance) {
+            this.generateFicticiousPlayers(club.id, 1);
+        }
+    });
+},
+
+// Distribuir prêmios por posição
+distributeAwards(stageId, standings) {
+    const awards = this.competitionStageAwards.filter(a => a.stageId === stageId);
+    
+    awards.forEach(award => {
+        const teamAtPosition = standings[award.place - 1];
+        if (teamAtPosition) {
+            const club = this.getClub(teamAtPosition.id);
+            if (club) {
+                club.transferBalance = (club.transferBalance || 0) + award.award;
+                console.log(`${club.name} recebeu ${this.formatValue(award.award)} por ${award.place}º lugar`);
+            }
         }
     });
 },
@@ -982,11 +1964,11 @@ updateRatingsFromStats(clubsStats) {
     },
 
     calcExpectedGoals(teamRating, oppRating, isHome = false) {
-        const F = 2.5;
+        const F = 4.5;
         const atk = teamRating + (isHome ? F : 0);
         const def = oppRating + (isHome ? 0 : F);
         const diff = atk - def;
-        return Math.max(1.2 + 0.06 * Math.sign(diff) * (Math.abs(diff) ** 1.2), 0.1);
+        return Math.max(1.2 + 0.02 * Math.sign(diff) * (Math.abs(diff) ** 1.2), 0.1);
     },
 
     initializeStandings(teams) {
@@ -1034,7 +2016,19 @@ updateRatingsFromStats(clubsStats) {
             alert("Por favor, selecione um país.");
             return null;
         }
-this.resetContinentalQualifications();
+        
+        // Revelar jogadores da academia no início da temporada
+        this.revealYouthPlayers();
+        
+        // Garantir que todos os times tenham pelo menos 16 jogadores
+        this.clubs.forEach(club => {
+            const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
+            if (clubPlayers.length < 16) {
+                this.generateFicticiousPlayers(club.id, 16 - clubPlayers.length);
+            }
+        });
+        
+        this.resetContinentalQualifications();
         const countryCompetitions = this.competitions
             .filter(c => c.countryId === countryId)
             .sort((a, b) => a.importanceOrder - b.importanceOrder);
@@ -1067,6 +2061,13 @@ this.resetContinentalQualifications();
             }
             
             if (competitionResult) {
+                // Distribuir prêmios por posição
+                competitionResult.stages.forEach(stageData => {
+                    if (stageData.standings && stageData.standings.length > 0) {
+                        this.distributeAwards(stageData.stage.id, stageData.standings);
+                    }
+                });
+                
                 seasonResult.competitions.push(competitionResult);
             }
         }
@@ -1077,6 +2078,16 @@ this.resetContinentalQualifications();
         }
         
         this.applyPromotionsAndRelegations(seasonResult);
+        
+        // Evoluir jogadores no final da temporada
+        this.evolvePlayersEndOfSeason();
+        
+        // Janela de transferências
+        this.runTransferWindow();
+        
+        // Guardar relatório de transferências na temporada
+        seasonResult.transfers = this.getTransferReport();
+        
         this.seasonHistory.push(seasonResult);
         
         return seasonResult;
@@ -1629,6 +2640,14 @@ resetContinentalQualifications() {
         this.updateDivisionDisplay();
         document.getElementById("seasonDivisionSelector").style.display = 'block';
         
+        // Mostrar botão de transferências se houver transferências
+        const transfersBtn = document.getElementById("viewTransfersBtn");
+        if (seasonData.transfers && seasonData.transfers.length > 0) {
+            transfersBtn.style.display = 'inline-block';
+        } else {
+            transfersBtn.style.display = 'none';
+        }
+        
         this.viewCompetition();
     },
 
@@ -1651,6 +2670,9 @@ resetContinentalQualifications() {
         document.getElementById("roundSelector").style.display = 'none';
         document.getElementById("groupSelector").style.display = 'none';
         document.getElementById("viewPlayoffBtn").style.display = 'none';
+        document.getElementById("seasonTransfers").style.display = 'none';
+        const transfersBtn = document.getElementById("viewTransfersBtn");
+        if (transfersBtn) transfersBtn.innerHTML = '<i class="fas fa-exchange-alt"></i> Ver Transferências';
     },
 
     viewCompetition() {
@@ -1759,8 +2781,20 @@ resetContinentalQualifications() {
         const roundSelector = document.getElementById("viewRound");
         roundSelector.innerHTML = '';
         
-        if (this.schedule && this.schedule.length > 0) {
-            for (let i = 1; i <= this.schedule.length; i++) {
+        // Para grupos, pega o máximo de rodadas entre todos os grupos
+        let maxRounds = 0;
+        if (this.currentGroups && this.currentGroups.length > 0) {
+            this.currentGroups.forEach(group => {
+                if (group.schedule && group.schedule.length > maxRounds) {
+                    maxRounds = group.schedule.length;
+                }
+            });
+        } else if (this.schedule && this.schedule.length > 0) {
+            maxRounds = this.schedule.length;
+        }
+        
+        if (maxRounds > 0) {
+            for (let i = 1; i <= maxRounds; i++) {
                 const option = document.createElement("option");
                 option.value = i;
                 option.textContent = `Rodada ${i}`;
@@ -1846,6 +2880,124 @@ resetContinentalQualifications() {
             button.textContent = "Ver Playoff";
         }
     },
+
+    toggleTransfersView() {
+        const standings = document.getElementById("seasonStandings");
+        const matches = document.getElementById("seasonMatches");
+        const transfers = document.getElementById("seasonTransfers");
+        const button = document.getElementById("viewTransfersBtn");
+        const playoff = document.getElementById("playoffBracket");
+        
+        if (transfers.style.display === "none") {
+            standings.style.display = "none";
+            matches.style.display = "none";
+            playoff.style.display = "none";
+            transfers.style.display = "block";
+            button.innerHTML = '<i class="fas fa-table"></i> Ver Tabela';
+            this.displayTransfers();
+        } else {
+            standings.style.display = "block";
+            matches.style.display = "block";
+            transfers.style.display = "none";
+            button.innerHTML = '<i class="fas fa-exchange-alt"></i> Ver Transferências';
+        }
+    },
+
+    displayTransfers() {
+        const container = document.getElementById("seasonTransfers");
+        if (!container) return;
+        
+        const seasonData = this.seasonHistory[this.currentSeason - 1];
+        if (!seasonData || !seasonData.transfers || seasonData.transfers.length === 0) {
+            container.innerHTML = `
+                <div class="section-card">
+                    <div class="section-header">
+                        <i class="fas fa-exchange-alt"></i>
+                        <h2>Transferências da Temporada ${this.currentSeason}</h2>
+                    </div>
+                    <p style="text-align: center; color: #888; padding: 20px;">Nenhuma transferência realizada nesta temporada.</p>
+                </div>
+            `;
+            return;
+        }
+        
+        // Gerar cards para mobile
+        let cardsHtml = '';
+        seasonData.transfers.forEach(transfer => {
+            cardsHtml += `
+                <div class="transfer-card" style="background: #f9f9f9; border-radius: 8px; padding: 12px; margin-bottom: 10px; border-left: 3px solid #4CAF50;">
+                    <div style="font-weight: bold; font-size: 14px; margin-bottom: 8px;">${transfer.player}</div>
+                    <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #666; margin-bottom: 4px;">
+                        <span style="flex: 1; text-align: left;">${transfer.from}</span>
+                        <i class="fas fa-arrow-right" style="color: #4CAF50;"></i>
+                        <span style="flex: 1; text-align: right;">${transfer.to}</span>
+                    </div>
+                    <div style="font-size: 13px; color: #2196F3; font-weight: 600; text-align: right;">${transfer.value}</div>
+                </div>
+            `;
+        });
+        
+        // Gerar tabela para desktop
+        let tableHtml = `
+            <table class="standings-table transfers-table" style="width: 100%; font-size: 14px;">
+                <thead>
+                    <tr>
+                        <th style="text-align: left; padding: 8px 4px;">Jogador</th>
+                        <th style="text-align: left; padding: 8px 4px;">De</th>
+                        <th style="text-align: left; padding: 8px 4px;">Para</th>
+                        <th style="text-align: right; padding: 8px 4px;">Valor</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+        
+        seasonData.transfers.forEach(transfer => {
+            tableHtml += `
+                <tr>
+                    <td style="padding: 6px 4px;"><strong>${transfer.player}</strong></td>
+                    <td style="padding: 6px 4px; font-size: 12px;">${transfer.from}</td>
+                    <td style="padding: 6px 4px; font-size: 12px;">${transfer.to}</td>
+                    <td style="padding: 6px 4px; text-align: right; white-space: nowrap;">${transfer.value}</td>
+                </tr>
+            `;
+        });
+        
+        tableHtml += `
+                </tbody>
+            </table>
+        `;
+        
+        let html = `
+            <style>
+                .transfers-mobile { display: none; }
+                .transfers-desktop { display: block; overflow-x: auto; }
+                @media (max-width: 600px) {
+                    .transfers-mobile { display: block; }
+                    .transfers-desktop { display: none; }
+                }
+            </style>
+            <div class="section-card">
+                <div class="section-header">
+                    <i class="fas fa-exchange-alt"></i>
+                    <h2 style="font-size: 16px;">Transferências - Temporada ${this.currentSeason}</h2>
+                </div>
+                <div class="transfers-list">
+                    <div class="transfers-mobile">
+                        ${cardsHtml}
+                    </div>
+                    <div class="transfers-desktop">
+                        ${tableHtml}
+                    </div>
+                </div>
+                <div class="transfers-summary" style="padding: 10px; background: #f5f5f5; border-radius: 4px; margin-top: 10px;">
+                    <p style="margin: 0; font-size: 14px;"><strong>Total de Transferências:</strong> ${seasonData.transfers.length}</p>
+                </div>
+            </div>
+        `;
+        
+        container.innerHTML = html;
+    },
+
 
     async displayStandings(containerId) {
         const container = document.getElementById(containerId); 
@@ -2322,7 +3474,8 @@ getRelevantTransitions() {
         const matchesList = container.querySelector(".matches-list");
         
         if (this.currentGroups.length > 0) {
-            await this.displayGroupRoundMatches(round, matchesList);
+            // Para competições com grupos, mostra todos os jogos de cada grupo nesta rodada
+            await this.displayAllGroupsRoundMatches(round, matchesList);
         } else {
             await this.displayLeagueRoundMatches(round, matchesList);
         }
@@ -2358,7 +3511,56 @@ getRelevantTransitions() {
         }
     },
 
+    async displayAllGroupsRoundMatches(round, matchesList) {
+        // Exibe jogos de TODOS os grupos separados por seção
+        if (this.currentGroups.length === 0) return;
+        
+        for (const group of this.currentGroups) {
+            const groupMatches = group.schedule ? group.schedule[round - 1] : null;
+            
+            if (!groupMatches || groupMatches.length === 0) continue;
+            
+            // Cabeçalho do grupo
+            const groupHeader = document.createElement("div");
+            groupHeader.className = "group-matches-header";
+            groupHeader.innerHTML = `<h4 style="margin: 20px 0 10px 0; padding: 10px; background: linear-gradient(to right, #2c3e50, #3498db); color: white; border-radius: 5px; text-align: center;">Grupo ${group.id}</h4>`;
+            matchesList.appendChild(groupHeader);
+            
+            const groupMatchesContainer = document.createElement("div");
+            groupMatchesContainer.className = "group-matches-container";
+            groupMatchesContainer.style.marginBottom = "15px";
+            groupMatchesContainer.style.padding = "10px";
+            groupMatchesContainer.style.backgroundColor = "#f8f9fa";
+            groupMatchesContainer.style.borderRadius = "5px";
+            
+            for (const match of groupMatches) {
+                const home = this.getClub(match.home);
+                const away = this.getClub(match.away);
+                if (!home || !away) continue;
+                
+                const [homeLogo, awayLogo] = await Promise.all([
+                    this.loadLogo(home.id), 
+                    this.loadLogo(away.id)
+                ]);
+                
+                const matchContainer = document.createElement("div"); 
+                groupMatchesContainer.appendChild(matchContainer);
+                
+                this.displayMatchResult(
+                    home, away, 
+                    match.played ? match.homeScore : "vs", 
+                    match.played ? match.awayScore : "", 
+                    homeLogo, awayLogo, 
+                    matchContainer
+                );
+            }
+            
+            matchesList.appendChild(groupMatchesContainer);
+        }
+    },
+
     async displayGroupRoundMatches(round, matchesList) {
+        // Mantida para compatibilidade - exibe apenas o grupo selecionado
         if (this.currentGroups.length === 0) return;
         
         const currentGroup = this.currentGroups[this.currentGroupIndex];
@@ -2551,9 +3753,10 @@ getRelevantTransitions() {
             }
             
             const profileHTML = `
-            <div class="profile-buttons" style="display: flex; gap: 10px; margin-bottom: 20px;">
+            <div class="profile-buttons" style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px;">
                 <button id="viewTitlesBtn" class="btn btn-primary">Ver Títulos</button>
                 <button id="viewTrajectoryBtn" class="btn btn-primary">Trajetória</button>
+                <button id="viewSquadBtn" class="btn btn-success">Elenco</button>
             </div>
 <div style="text-align: center;">
     ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${team.name}" class="logo"></div>` : ''} 
@@ -2562,7 +3765,9 @@ getRelevantTransitions() {
             <p><i class="fas fa-info-circle"></i> <strong>Tipo:</strong> ${teamRelation}</p>
             <p><i class="fas fa-flag"></i> <strong>País:</strong> ${country}</p>
             <p><i class="fas fa-trophy"></i> <strong>Competições:</strong> ${competitionsText}</p>
-            <p><i class="fas fa-star"></i> <strong>Rating:</strong> ${team.originalRating.toFixed(1)}</p> <br>
+            <p><i class="fas fa-star"></i> <strong>Rating:</strong> ${team.originalRating.toFixed(1)}</p>
+            <p><i class="fas fa-money-bill-wave"></i> <strong>Balanço:</strong> ${this.formatValue(team.transferBalance || 0)}</p>
+            <p><i class="fas fa-child"></i> <strong>Base Juvenil:</strong> ${team.youth || 10}/20</p>
             ${seasonStats ? `
                 <p><i class="fas fa-chart-line"></i> <strong>Rating da Simulação:</strong> ${seasonStats.currentRating.toFixed(1)}</p>
             ` : ''}
@@ -2573,6 +3778,156 @@ getRelevantTransitions() {
             
             document.getElementById('viewTitlesBtn').addEventListener('click', () => this.showTeamTitles(teamId));
             document.getElementById('viewTrajectoryBtn').addEventListener('click', () => this.showTeamTrajectory(teamId));
+            document.getElementById('viewSquadBtn').addEventListener('click', () => this.showTeamSquad(teamId));
+        });
+    },
+    
+    // Nova função: Mostrar elenco do time
+    showTeamSquad(teamId) {
+        const team = this.getClub(teamId);
+        if (!team) return;
+        
+        const teamPlayers = this.players
+            .filter(p => p.clubId === teamId && !p.retired)
+            .sort((a, b) => a.role - b.role || b.rating - a.rating);
+        
+        let squadHTML = '';
+        
+        if (teamPlayers.length > 0) {
+            const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+            
+            squadHTML = `
+            <div style="max-height: 400px; overflow-y: auto;">
+                <table class="standings-table" style="width: 100%; margin-top: 10px;">
+                    <thead>
+                        <tr>
+                            <th>Nome</th>
+                            <th>Pos</th>
+                            <th>Idade</th>
+                            <th>OVR</th>
+                            <th>POT</th>
+                            <th>Valor</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            teamPlayers.forEach(player => {
+                const age = currentYear - player.dob;
+                const roleInfo = this.roleMap[player.role] || { name: '?' };
+                const value = this.calcPlayerValue(player);
+                
+                squadHTML += `
+                <tr style="cursor: pointer;" onclick="App.showPlayerProfile('${player.id}')">
+                    <td>${player.name}</td>
+                    <td>${roleInfo.name}</td>
+                    <td>${age}</td>
+                    <td>${player.rating.toFixed(0)}</td>
+                    <td>${player.ratingPotential.toFixed(0)}</td>
+                    <td>${this.formatValue(value)}</td>
+                </tr>
+                `;
+            });
+            
+            squadHTML += `
+                    </tbody>
+                </table>
+            </div>
+            `;
+        } else {
+            squadHTML = `<div style="text-align: center; padding: 20px; color: #666;">Nenhum jogador no elenco</div>`;
+        }
+        
+        this.loadLogo(teamId).then(logo => {
+            document.getElementById('profileContent').innerHTML = `
+            <div class="profile-buttons" style="display: flex; gap: 10px; margin-bottom: 20px;">
+                <button id="backToProfileBtn" class="btn btn-secondary">Voltar ao Perfil</button>
+            </div>
+            <div style="text-align: center;">
+                ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${team.name}" class="logo"></div>` : ''} 
+                ${team.name}
+            </div>
+            <h4 style="text-align: center;">Elenco (${this.players.filter(p => p.clubId === teamId && !p.retired).length} jogadores)</h4>
+            ${squadHTML}
+            `;
+            document.getElementById('backToProfileBtn').addEventListener('click', () => this.showTeamProfile(teamId));
+        });
+    },
+    
+    // Nova função: Mostrar perfil do jogador
+    showPlayerProfile(playerId) {
+        const player = this.players.find(p => p.id === playerId);
+        if (!player) return;
+        
+        const club = this.getClub(player.clubId);
+        const country = this.countries.find(c => String(c.id) === String(player.countryId))?.name || '-';
+        const roleInfo = this.roleMap[player.role] || { name: '?' };
+        const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+        const age = currentYear - player.dob;
+        const value = this.calcPlayerValue(player);
+        
+        // Buscar estatísticas do jogador
+        const playerStatsData = this.playerStats.filter(s => s.playerId === playerId);
+        
+        let statsHTML = '';
+        if (playerStatsData.length > 0) {
+            statsHTML = `
+            <h4 style="text-align: center; margin-top: 20px;">Estatísticas</h4>
+            <div style="max-height: 200px; overflow-y: auto;">
+                <table class="standings-table" style="width: 100%;">
+                    <thead>
+                        <tr>
+                            <th>Ano</th>
+                            <th>Clube</th>
+                            <th>Jogos</th>
+                            <th>Gols</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+            
+            playerStatsData.forEach(stat => {
+                const statClub = this.getClub(stat.clubId);
+                statsHTML += `
+                <tr>
+                    <td>${stat.year}</td>
+                    <td>${statClub ? statClub.name : '-'}</td>
+                    <td>${stat.games}</td>
+                    <td>${stat.goals}</td>
+                </tr>
+                `;
+            });
+            
+            statsHTML += `
+                    </tbody>
+                </table>
+            </div>
+            `;
+        }
+        
+        const totalGoals = playerStatsData.reduce((sum, s) => sum + s.goals, 0);
+        const totalGames = playerStatsData.reduce((sum, s) => sum + s.games, 0);
+        
+        this.loadLogo(player.clubId).then(logo => {
+            document.getElementById('profileContent').innerHTML = `
+            <div class="profile-buttons" style="display: flex; gap: 10px; margin-bottom: 20px;">
+                <button id="backToSquadBtn" class="btn btn-secondary">Voltar ao Elenco</button>
+            </div>
+            <div style="text-align: center;">
+                ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${club?.name}" class="logo"></div>` : ''} 
+                <h3>${player.name}</h3>
+            </div>
+            <p><i class="fas fa-running"></i> <strong>Posição:</strong> ${roleInfo.name}</p>
+            <p><i class="fas fa-flag"></i> <strong>Nacionalidade:</strong> ${country}</p>
+            <p><i class="fas fa-birthday-cake"></i> <strong>Idade:</strong> ${age} anos (${player.dob})</p>
+            <p><i class="fas fa-star"></i> <strong>Overall:</strong> ${player.rating.toFixed(0)}</p>
+            <p><i class="fas fa-chart-line"></i> <strong>Potencial:</strong> ${player.ratingPotential.toFixed(0)}</p>
+            <p><i class="fas fa-money-bill-wave"></i> <strong>Valor:</strong> ${this.formatValue(value)}</p>
+            <p><i class="fas fa-futbol"></i> <strong>Gols na Carreira:</strong> ${totalGoals}</p>
+            <p><i class="fas fa-gamepad"></i> <strong>Jogos na Carreira:</strong> ${totalGames}</p>
+            ${statsHTML}
+            `;
+            document.getElementById('backToSquadBtn').addEventListener('click', () => this.showTeamSquad(player.clubId));
         });
     },
     

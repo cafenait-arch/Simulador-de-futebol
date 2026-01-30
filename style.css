@@ -394,10 +394,6 @@ button i {
 
 /* Logos */
 .logo-wrap {
-    width: 20px;
-    height: 20px;
-    background-color: white;
-    border-radius: 50%;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -405,8 +401,8 @@ button i {
 }
 
 .logo {
-    width: 12px;
-    height: 12px;
+    width: 15px;
+    height: 15px;
     display: inline-block;
     vertical-align: middle;
 }

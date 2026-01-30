@@ -746,23 +746,73 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
             
             let aggregateHome = 0;
             let aggregateAway = 0;
+            let allHomeScorers = [];
+            let allAwayScorers = [];
+            let homeLineup1 = [], awayLineup1 = [], homeLineup2 = [], awayLineup2 = [];
+            let homeFormation1 = '', awayFormation1 = '', homeFormation2 = '', awayFormation2 = '';
             
-            const homeExpected1 = this.calcExpectedGoals(club1.rating, club2.rating, true);
-            const awayExpected1 = this.calcExpectedGoals(club2.rating, club1.rating, false);
+            // === JOGO 1: club1 em casa ===
+            const homeLineupData1 = this.selectLineup(club1.id);
+            const awayLineupData1 = this.selectLineup(club2.id);
+            homeLineup1 = homeLineupData1.lineup;
+            awayLineup1 = awayLineupData1.lineup;
+            homeFormation1 = homeLineupData1.formation;
+            awayFormation1 = awayLineupData1.formation;
+            
+            // Registrar jogos para cada jogador
+            homeLineup1.forEach(p => this.addPlayerGame(p.id));
+            awayLineup1.forEach(p => this.addPlayerGame(p.id));
+            
+            // Calcular stats do time baseado nos jogadores escalados
+            const homeStats1 = this.calculateTeamStats(club1.id, homeLineup1);
+            const awayStats1 = this.calculateTeamStats(club2.id, awayLineup1);
+            
+            const homeExpected1 = this.calcExpectedGoalsNew(homeStats1, awayStats1, true);
+            const awayExpected1 = this.calcExpectedGoalsNew(awayStats1, homeStats1, false);
             const homeScore1 = this.poisson(homeExpected1);
             const awayScore1 = this.poisson(awayExpected1);
+            
+            // Simular quem marcou os gols
+            const homeScorers1 = this.simulateGoalScorers(homeLineup1, homeScore1);
+            const awayScorers1 = this.simulateGoalScorers(awayLineup1, awayScore1);
+            allHomeScorers.push(...homeScorers1);
+            allAwayScorers.push(...awayScorers1);
+            
             aggregateHome += homeScore1;
             aggregateAway += awayScore1;
             
             let homeScore2 = 0;
             let awayScore2 = 0;
+            
+            // === JOGO 2 (se numLegs > 1): club2 em casa ===
             if (numLegs > 1) {
-                const homeExpected2 = this.calcExpectedGoals(club2.rating, club1.rating, true);
-                const awayExpected2 = this.calcExpectedGoals(club1.rating, club2.rating, false);
+                const homeLineupData2 = this.selectLineup(club2.id);
+                const awayLineupData2 = this.selectLineup(club1.id);
+                homeLineup2 = homeLineupData2.lineup;
+                awayLineup2 = awayLineupData2.lineup;
+                homeFormation2 = homeLineupData2.formation;
+                awayFormation2 = awayLineupData2.formation;
+                
+                // Registrar jogos
+                homeLineup2.forEach(p => this.addPlayerGame(p.id));
+                awayLineup2.forEach(p => this.addPlayerGame(p.id));
+                
+                const homeStats2 = this.calculateTeamStats(club2.id, homeLineup2);
+                const awayStats2 = this.calculateTeamStats(club1.id, awayLineup2);
+                
+                const homeExpected2 = this.calcExpectedGoalsNew(homeStats2, awayStats2, true);
+                const awayExpected2 = this.calcExpectedGoalsNew(awayStats2, homeStats2, false);
                 homeScore2 = this.poisson(homeExpected2);
                 awayScore2 = this.poisson(awayExpected2);
-                aggregateHome += awayScore2;
-                aggregateAway += homeScore2;
+                
+                // Simular gols do jogo 2
+                const homeScorers2 = this.simulateGoalScorers(homeLineup2, homeScore2);
+                const awayScorers2 = this.simulateGoalScorers(awayLineup2, awayScore2);
+                allAwayScorers.push(...homeScorers2); // club2 marcando em casa = gols do away no agregado
+                allHomeScorers.push(...awayScorers2); // club1 marcando fora = gols do home no agregado
+                
+                aggregateHome += awayScore2; // club1 marcou fora
+                aggregateAway += homeScore2; // club2 marcou em casa
             }
             
             let winner;
@@ -785,7 +835,13 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
                 winner,
                 isBye: false, 
                 isPenalty: aggregateHome === aggregateAway,
-                numLegs: numLegs
+                numLegs: numLegs,
+                homeLineup: homeLineup1.map(p => ({ id: p.id, name: p.name, role: p.role })),
+                awayLineup: awayLineup1.map(p => ({ id: p.id, name: p.name, role: p.role })),
+                homeFormation: homeFormation1,
+                awayFormation: awayFormation1,
+                homeScorers: allHomeScorers.map(p => ({ id: p.id, name: p.name })),
+                awayScorers: allAwayScorers.map(p => ({ id: p.id, name: p.name }))
             });
             winners.push(winner);
         }
@@ -1283,15 +1339,15 @@ generateFicticiousPlayers(clubId, count) {
     
     // Distribuição mínima de posições: 1 GOL, 2 LE, 2 LD, 2 VL, 5 MO, 2 PE, 2 PD, 2 AT = 18 jogadores
     const minPositions = {
-        1: 2,  // GOL
-        2: 3,  // LD
-        3: 3,  // LE
+        1: 1,  // GOL
+        2: 2,  // LD
+        3: 2,  // LE
         4: 3, // ZG
-        5: 3,  // VL
-        6: 3,  // PE
-        7: 3,  // PD
-        8: 6,  // MO
-        9: 4   // AT
+        5: 2,  // VL
+        6: 2,  // PE
+        7: 2,  // PD
+        8: 5,  // MO
+        9: 2   // AT
     };
     
     // Verificar jogadores existentes no clube
@@ -1317,7 +1373,7 @@ generateFicticiousPlayers(clubId, count) {
     const rolesToGenerate = [...neededPositions];
     
     // Adicionar posições extras aleatórias se necessário
-    const allRoles = [1, 2, 3, 5, 6, 7, 8, 9];
+    const allRoles = [1, 2, 3, 4, 5, 6, 7, 8, 9];
     while (rolesToGenerate.length < totalNeeded) {
         rolesToGenerate.push(allRoles[Math.floor(Math.random() * allRoles.length)]);
     }
@@ -1340,34 +1396,38 @@ generateFicticiousPlayers(clubId, count) {
         
         const fullName = `${firstName} ${lastName}`;
         
-        // NOVO: Calcular rating baseado no rating do time (club.rating)
-        // Rating do jogador varia entre -15 e +5 do rating do time, com distribuição normal
+        // ============================================
+        // JOGADORES GERADOS POR FALTA NO ELENCO
+        // Rating entre -10 e +3 do rating do clube
+        // ============================================
+        
         const teamRating = club.rating || 50;
-        const variation = (Math.random() + Math.random() + Math.random()) / 3; // Distribuição mais centralizada
-        const ratingOffset = -15 + variation * 20; // Range de -15 a +5
-        const baseRating = teamRating + ratingOffset;
         
-        // Aplicar bônus de Youth (pequeno ajuste)
-        const youthBonus = (club.youth / 20) * 5; // 0-5 de bônus
-        const rating = Math.min(95, Math.max(30, baseRating + youthBonus * Math.random()));
+        // Rating: -10 a +3 do rating do clube (distribuição normal centralizada)
+        const variation = (Math.random() + Math.random() + Math.random()) / 3; // 0 a 1, centralizado
+        const ratingOffset = -10 + variation * 13; // Range de -10 a +3
+        let rating = Math.round(teamRating + ratingOffset);
         
-        // Potencial baseado no rating e Youth
-        const potentialBonus = (club.youth / 20) * 15;
-        const ratingPotential = Math.min(99, rating + 3 + Math.random() * (8 + potentialBonus));
+        // Limitar rating entre 30 e 90
+        rating = Math.max(30, Math.min(97, rating));
+        
+        // Potencial: entre +3 e +12 acima do rating
+        const potentialGain = 3 + Math.floor(Math.random() * 10);
+        let finalPotential = Math.min(99, rating + potentialGain);
         
         // Posição definida pela distribuição mínima
         const role = rolesToGenerate[i];
         
         // Idade entre 17 e 35
         const currentYear = new Date().getFullYear() + this.seasonHistory.length;
-        const age = 17 + Math.floor(Math.random() * 18);
+        const age = 23 + Math.floor(Math.random() * 4);
         const dob = currentYear - age;
         
         const newPlayer = {
             id: `gen_${clubId}_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 5)}`,
             name: fullName,
             rating: Math.round(rating),
-            ratingPotential: Math.round(ratingPotential),
+            ratingPotential: Math.round(finalPotential),
             clubId: clubId,
             countryId: club.countryId,
             role: role,
@@ -1506,7 +1566,6 @@ evolvePlayersEndOfSeason() {
 
 // Executar janela de transferências
 runTransferWindow() {
-    console.log("=== JANELA DE TRANSFERÊNCIAS ===");
     
     // Criar lista de jogadores disponíveis para transferência
     const transferList = this.createTransferList();
@@ -1518,325 +1577,177 @@ runTransferWindow() {
         this.processClubTransfers(club, transferList);
     });
     
-    console.log("=== FIM DA JANELA DE TRANSFERÊNCIAS ===");
 },
 
-// Criar lista de jogadores disponíveis para transferência
+// -------------------------------
+// LISTA DE JOGADORES PARA TRANSFERÊNCIA
+// -------------------------------
 createTransferList() {
-    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
-    const transferList = [];
-    
-    this.players.forEach(player => {
-        if (player.retired) return;
+        const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+        const transferList = [];
         
-        const age = currentYear - player.dob;
-        const club = this.getClub(player.clubId);
-        if (!club) return;
-        
-        // Jogadores têm chance de querer sair baseado em fatores
-        const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
-        const avgRating = clubPlayers.reduce((sum, p) => sum + p.rating, 0) / clubPlayers.length;
-        
-        // Jogadores muito melhores que a média do time querem sair
-        const ratingDiff = player.rating - avgRating;
-        let wantsToLeave = false;
-        
-        if (ratingDiff > 15) {
-            wantsToLeave = Math.random() < 0.6; // 60% chance
-        } else if (ratingDiff > 10) {
-            wantsToLeave = Math.random() < 0.3; // 30% chance
-        } else if (ratingDiff > 5) {
-            wantsToLeave = Math.random() < 0.1; // 10% chance
-        }
-        
-        // Jogadores velhos têm menos chance de transferência
-        if (age > 32) {
-            wantsToLeave = wantsToLeave && Math.random() < 0.3;
-        }
-        
-        // Jogadores jovens com alto potencial podem querer sair
-        if (age < 23 && player.ratingPotential > player.rating + 10) {
-            wantsToLeave = wantsToLeave || Math.random() < 0.2;
-        }
-        
-        if (wantsToLeave) {
-            const value = this.calcPlayerValue(player);
+        this.players.forEach(player => {
+            if (player.retired) return; // ignora aposentados
+            const club = this.getClub(player.clubId);
+            if (!club) return;
+            
             transferList.push({
                 player,
-                value,
-                age,
+                value: this.calcPlayerValue(player),
+                age: currentYear - player.dob,
                 sellingClub: club
             });
-        }
-    });
-    
-    return transferList;
-},
-
-// Processar transferências de um clube
-processClubTransfers(club, transferList) {
-    const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
-    
-    // Analisar necessidades do time
-    const needs = this.analyzeTeamNeeds(club, clubPlayers);
-    
-    // Budget disponível para transferências (50-80% do saldo)
-    const transferBudget = club.transferBalance * (0.5 + Math.random() * 0.3);
-    let remainingBudget = transferBudget;
-    
-    // Ordenar necessidades por prioridade
-    const prioritizedNeeds = Object.entries(needs)
-        .filter(([role, data]) => data.priority > 0)
-        .sort((a, b) => b[1].priority - a[1].priority);
-    
-    // Tentar contratar para cada necessidade
-    for (const [role, needData] of prioritizedNeeds) {
-        if (remainingBudget < 100000) break; // Mínimo para contratar
+        });
         
-        const roleNum = parseInt(role);
-        const targetPlayer = this.findBestTransferTarget(
-            club, 
-            roleNum, 
-            needData, 
-            transferList, 
-            remainingBudget
+        return transferList;
+    },
+    
+    // -------------------------------
+    // PROCESSA TRANSFERÊNCIAS DE UM CLUBE
+    // -------------------------------
+    processClubTransfers(club, transferList) {
+        let clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
+        let remainingBudget = club.transferBalance;
+        
+        const idealCount = { 1: 2, 2: 2, 3: 2, 4: 4, 5: 2, 6: 2, 7: 2, 8: 4, 9: 3 };
+        
+        // Quantos jogadores o clube consegue comprar com orçamento médio
+        const avgPlayerValue = transferList.reduce((s, t) => s + t.value, 0) / transferList.length;
+        const possibleBuys = Math.max(1, Math.floor(remainingBudget / avgPlayerValue));
+        
+        // Criar fila de posições fracas, repetindo mais vezes as mais abaixo da média
+        let needs = this.analyzeTeamNeeds(club, clubPlayers);
+        let roleQueue = [];
+        Object.keys(needs).forEach(role => {
+            const deficit = Math.max(0, needs[role].priority);
+            const repeats = Math.ceil(deficit / 5) + 1;
+            for (let i = 0; i < repeats; i++) roleQueue.push(parseInt(role));
+        });
+        
+        // Embaralhar fila
+        roleQueue = roleQueue.sort(() => Math.random() - 0.5);
+        
+        for (let i = 0; i < possibleBuys && remainingBudget > 100000; i++) {
+            if (!roleQueue.length) break;
+            const roleNum = roleQueue.shift();
+            
+            // Filtrar candidatos disponíveis
+            let candidates = transferList.filter(t =>
+                t.player.role === roleNum &&
+                t.sellingClub.id !== club.id &&
+                t.value <= remainingBudget
+            );
+            if (!candidates.length) continue;
+            
+            // Score balanceado: melhora a posição sem exagero
+            const positionPlayers = clubPlayers.filter(p => p.role === roleNum);
+            const positionAvg = positionPlayers.length ?
+                positionPlayers.reduce((s, p) => s + p.rating, 0) / positionPlayers.length :
+                0;
+            
+            const teamAvg = clubPlayers.length ?
+                clubPlayers.reduce((s, p) => s + p.rating, 0) / clubPlayers.length :
+                50;
+            
+            candidates.forEach(c => {
+                const deficit = Math.max(0, teamAvg - positionAvg);
+                const potentialBonus = c.player.ratingPotential - c.player.rating;
+                c.score = c.player.rating + deficit + potentialBonus * 0.5; // balanceado
+            });
+            
+            candidates.sort((a, b) => b.score - a.score);
+            const target = candidates[0];
+            
+            const success = this.executeTransfer(target.player, target.sellingClub, club, target.value);
+            if (success) {
+                remainingBudget -= target.value;
+                const idx = transferList.findIndex(t => t.player.id === target.player.id);
+                if (idx !== -1) transferList.splice(idx, 1);
+                clubPlayers.push(target.player);
+            }
+        }
+    },
+    
+    // -------------------------------
+    // ENCONTRAR MELHOR JOGADOR PARA UMA POSIÇÃO
+    // -------------------------------
+    findBestTransferTarget(club, role, needData, transferList, budget) {
+        const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
+        const positionPlayers = clubPlayers.filter(p => p.role === role);
+        const positionAvg = positionPlayers.length ?
+            positionPlayers.reduce((s, p) => s + p.rating, 0) / positionPlayers.length :
+            0;
+        
+        let candidates = transferList.filter(t =>
+            t.player.role === role &&
+            t.sellingClub.id !== club.id &&
+            t.value <= budget
         );
         
-        if (targetPlayer) {
-            const success = this.executeTransfer(
-                targetPlayer.player,
-                targetPlayer.sellingClub,
-                club,
-                targetPlayer.value
-            );
+        if (!candidates.length) return null;
+        
+        candidates.forEach(c => {
+            const deficit = Math.max(0, 100 - positionAvg);
+            const potentialBonus = c.player.ratingPotential - c.player.rating;
+            c.score = c.player.rating + deficit + potentialBonus * 0.5;
+        });
+        
+        candidates.sort((a, b) => b.score - a.score);
+        return candidates[0];
+    },
+    
+    // -------------------------------
+    // ANALISA NECESSIDADES DO TIME
+    // -------------------------------
+    analyzeTeamNeeds(club, clubPlayers) {
+        const needs = {};
+        const avgTeamRating = clubPlayers.length ?
+            clubPlayers.reduce((s, p) => s + p.rating, 0) / clubPlayers.length :
+            50;
+        
+        Object.keys(this.roleMap).forEach(role => {
+            const players = clubPlayers.filter(p => p.role === Number(role));
+            const avgRating = players.length ?
+                players.reduce((s, p) => s + p.rating, 0) / players.length :
+                0;
             
-            if (success) {
-                remainingBudget -= targetPlayer.value;
-                // Remover jogador da lista de transferências
-                const idx = transferList.findIndex(t => t.player.id === targetPlayer.player.id);
-                if (idx !== -1) transferList.splice(idx, 1);
-            }
-        }
-    }
-},
-
-// Analisar necessidades do time
-analyzeTeamNeeds(club, clubPlayers) {
-    const needs = {};
-    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+            needs[role] = {
+                avgRating,
+                priority: avgTeamRating - avgRating // posições abaixo da média ganham prioridade
+            };
+        });
+        
+        return needs;
+    },
     
-    // Inicializar necessidades para cada posição
-    Object.keys(this.roleMap).forEach(role => {
-        needs[role] = {
-            count: 0,
-            avgRating: 0,
-            priority: 0,
-            minRating: 0,
-            hasYoungTalent: false
-        };
-    });
-    
-    // Contar jogadores por posição e calcular médias
-    clubPlayers.forEach(player => {
-        const role = player.role;
-        const age = currentYear - player.dob;
+    // -------------------------------
+    // EXECUTA TRANSFERÊNCIA
+    // -------------------------------
+    executeTransfer(player, sellingClub, buyingClub, value) {
+        const sellerPlayers = this.players.filter(p => p.clubId === sellingClub.id && !p.retired && p.id !== player.id);
+        const samePositionPlayers = sellerPlayers.filter(p => p.role === player.role);
         
-        if (needs[role]) {
-            needs[role].count++;
-            needs[role].avgRating += player.rating;
-            if (age < 25 && player.ratingPotential > player.rating + 5) {
-                needs[role].hasYoungTalent = true;
-            }
-        }
-    });
-    
-    // Calcular média e prioridades
-    const clubAvgRating = clubPlayers.reduce((sum, p) => sum + p.rating, 0) / clubPlayers.length;
-    
-    Object.keys(needs).forEach(role => {
-        const need = needs[role];
-        if (need.count > 0) {
-            need.avgRating = need.avgRating / need.count;
-        } else {
-            need.avgRating = 0;
-        }
+        if (samePositionPlayers.length < 1 || sellerPlayers.length < 16) return false;
+        if (buyingClub.transferBalance < value) return false;
         
-        // Definir quantidade ideal por posição
-        const idealCount = {
-            1: 2,  // GOL
-            2: 2,  // LD
-            3: 2,  // LE
-            4: 4,  // ZG
-            5: 2,  // VL
-            6: 2,  // PE
-            7: 2,  // PD
-            8: 2,  // MO
-            9: 3   // AT
-        };
+        player.clubId = buyingClub.id;
+        buyingClub.transferBalance -= value;
+        sellingClub.transferBalance += value;
         
-        const ideal = idealCount[role] || 2;
-        
-        // Calcular prioridade
-        // 1. Falta de jogadores na posição = alta prioridade
-        if (need.count < ideal) {
-            need.priority += (ideal - need.count) * 30;
-        }
-        
-        // 2. Rating baixo na posição = média prioridade
-        if (need.avgRating < clubAvgRating - 5 && need.count > 0) {
-            need.priority += 20;
-        }
-        
-        // 3. Falta de talento jovem = baixa prioridade
-        if (!need.hasYoungTalent && need.count >= ideal) {
-            need.priority += 10;
-        }
-        
-        // Rating mínimo desejado para contratação
-        need.minRating = Math.max(40, clubAvgRating - 10);
-    });
-    
-    return needs;
-},
-
-// Encontrar melhor alvo de transferência
-findBestTransferTarget(club, role, needData, transferList, budget) {
-    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
-    const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
-    const clubAvgRating = clubPlayers.reduce((sum, p) => sum + p.rating, 0) / clubPlayers.length;
-    
-    // Filtrar candidatos
-    const candidates = transferList.filter(t => {
-        // Mesma posição
-        if (t.player.role !== role) return false;
-        
-        // Não pode comprar do próprio time
-        if (t.sellingClub.id === club.id) return false;
-        
-        // Dentro do orçamento
-        if (t.value > budget) return false;
-        
-        // Rating mínimo
-        if (t.player.rating < needData.minRating) return false;
-        
-        // Não contratar jogador muito pior que a média
-        if (t.player.rating < clubAvgRating - 15) return false;
+        const currentYear = this.seasonHistory.length + 1;
+        this.playerStats.push({
+            playerId: player.id,
+            year: currentYear,
+            clubId: buyingClub.id,
+            goals: 0,
+            games: 0,
+            isTransfer: true,
+            fromClub: sellingClub.id,
+            transferValue: value
+        });
         
         return true;
-    });
-    
-    if (candidates.length === 0) return null;
-    
-    // Pontuar candidatos
-    candidates.forEach(c => {
-        const age = currentYear - c.player.dob;
-        let score = 0;
-        
-        // Rating do jogador
-        score += c.player.rating * 2;
-        
-        // Potencial (mais importante para jovens)
-        if (age < 25) {
-            score += (c.player.ratingPotential - c.player.rating) * 1.5;
-        }
-        
-        // Idade ideal (23-28)
-        if (age >= 23 && age <= 28) {
-            score += 20;
-        } else if (age < 23) {
-            score += 15;
-        } else if (age <= 31) {
-            score += 10;
-        }
-        
-        // Custo-benefício
-        const valuePerRating = c.value / c.player.rating;
-        score -= valuePerRating / 100000;
-        
-        // Se o time precisa de talento jovem e o candidato é jovem com potencial
-        if (!needData.hasYoungTalent && age < 23 && c.player.ratingPotential > c.player.rating + 8) {
-            score += 30;
-        }
-        
-        c.score = score;
-    });
-    
-    // Ordenar por score e retornar melhor
-    candidates.sort((a, b) => b.score - a.score);
-    
-    // Chance de contratar baseada na diferença de rating
-    const best = candidates[0];
-    if (best) {
-        const ratingDiff = best.player.rating - clubAvgRating;
-        let chanceToSign = 0.8; // 80% base
-        
-        // Jogador muito melhor pode não querer ir para time pior
-        if (ratingDiff > 10) {
-            chanceToSign -= (ratingDiff - 10) * 0.05;
-        }
-        
-        // Time rico tem mais chance de convencer
-        if (club.transferBalance > best.value * 3) {
-            chanceToSign += 0.1;
-        }
-        
-        if (Math.random() < chanceToSign) {
-            return best;
-        }
-    }
-    
-    return null;
-},
-
-// Executar transferência
-executeTransfer(player, sellingClub, buyingClub, value) {
-    // Verificar se o time vendedor ainda tem jogadores suficientes
-    const sellerPlayers = this.players.filter(p => 
-        p.clubId === sellingClub.id && !p.retired && p.id !== player.id
-    );
-    
-    // Contar quantos jogadores na mesma posição o vendedor terá
-    const samePositionPlayers = sellerPlayers.filter(p => p.role === player.role);
-    
-    // Não vender se ficar com menos de 1 na posição (exceto se tiver muitos)
-    if (samePositionPlayers.length < 1) {
-        return false;
-    }
-    
-    // Não vender se ficar com menos de 16 jogadores
-    if (sellerPlayers.length < 16) {
-        return false;
-    }
-    
-    // Verificar se o comprador pode pagar
-    if (buyingClub.transferBalance < value) {
-        return false;
-    }
-    
-    // Executar transferência
-    const oldClub = sellingClub.name;
-    player.clubId = buyingClub.id;
-    
-    // Atualizar saldos
-    buyingClub.transferBalance -= value;
-    sellingClub.transferBalance += value;
-    
-    
-    // Registrar transferência nas estatísticas do jogador
-    const currentYear = this.seasonHistory.length + 1;
-    this.playerStats.push({
-        playerId: player.id,
-        year: currentYear,
-        clubId: buyingClub.id,
-        goals: 0,
-        games: 0,
-        isTransfer: true,
-        fromClub: sellingClub.id,
-        transferValue: value
-    });
-    
-    return true;
-},
+    },
 
 // Gerar relatório de transferências
 getTransferReport() {
@@ -1913,7 +1824,7 @@ formatValue(valor) {
 revealYouthPlayers() {
     this.clubs.forEach(club => {
         // Chance de revelar jogador baseada no Youth
-        const revealChance = club.youth / 100; // 1% a 20%
+        const revealChance = 100; // 1% a 20%
         
         if (Math.random() < revealChance) {
             this.generateFicticiousPlayers(club.id, 1);
@@ -1931,7 +1842,6 @@ distributeAwards(stageId, standings) {
             const club = this.getClub(teamAtPosition.id);
             if (club) {
                 club.transferBalance = (club.transferBalance || 0) + award.award;
-                console.log(`${club.name} recebeu ${this.formatValue(award.award)} por ${award.place}º lugar`);
             }
         }
     });

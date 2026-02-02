@@ -11,7 +11,7 @@
 body {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: #222;
-    font-size: 12px;
+    font-size: 11.5px;
     min-height: 100vh;
     padding: 8px;
 }
@@ -314,11 +314,11 @@ button i {
 }
 
 .standings-table tr:nth-child(even) {
-    background: #f3f4f6;
+    background: #e6e6e6;
 }
 
 .standings-table tr:nth-child(odd) {
-    background: #ffffff;
+    background: #d6d6d6;
 }
 
 .standings-table tr:hover {
@@ -394,6 +394,10 @@ button i {
 
 /* Logos */
 .logo-wrap {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background-color: white;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -401,8 +405,8 @@ button i {
 }
 
 .logo {
-    width: 15px;
-    height: 15px;
+    width: 14px;
+    height: 14px;
     display: inline-block;
     vertical-align: middle;
 }
@@ -457,7 +461,7 @@ button i {
     display: inline-block;
     width: 14px;
     height: 14px;
-    border-radius: 50%;
+    border-radius: 25%;
     text-align: center;
     line-height: 14px;
     font-size: 5px;

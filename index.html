@@ -74,10 +74,6 @@
                 
                 <div class="controls">
                     <div class="select-group">
-                        <label><i class="fas fa-flag"></i> País:</label>
-                        <select id="seasonCountry"></select>
-                    </div>
-                    <div class="select-group">
                         <label><i class="fas fa-calendar-alt"></i> Temporadas:</label>
                         <input type="number" id="numSeasons" min="1" max="100" value="5">
                     </div>
@@ -106,6 +102,16 @@
                     </div>
                     
                     <div class="select-group" id="seasonDivisionSelector" style="display: none;">
+                    </div>
+                    
+                    <div class="select-group" id="viewCountrySelector" style="display: none;">
+                        <label><i class="fas fa-flag"></i> País:</label>
+                        <select id="viewCountry"></select>
+                    </div>
+                    
+                    <div class="select-group" id="competitionTypeSelector" style="display: none;">
+                        <label><i class="fas fa-layer-group"></i> Tipo:</label>
+                        <select id="viewCompetitionType"></select>
                     </div>
                     
                     <div class="select-group" id="competitionSelector" style="display: none;">

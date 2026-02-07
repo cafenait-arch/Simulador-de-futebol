@@ -1,12 +1,15 @@
 const App = {
     clubs: [], countries: [], competitions: [], competitionStages: [], competitionStageClubs: [],
-    competitionStageTransitions: [], competitionStageAwards: [], zipData: null, logoCache: new Map(), teamTitles: new Map(),
+    competitionStageTransitions: [], competitionStageAwards: [], zipData: null, logoCache: new Map(), flagCache: new Map(), teamTitles: new Map(),
     players: [], playerFicticiousNames: [], playerStats: [], // Novas tabelas
     seasonHistory: [], currentSeason: 0, currentCompetition: null, currentStage: null,
     standings: [], schedule: [], playoffBracket: [], 
     currentGroups: [], currentGroupIndex: 0, currentDivisions: [], currentDivisionIndex: 0,
     clubFormations: new Map(), // Armazena a formação fixa de cada time
     rejectedOffers: [], // Array para armazenar ofertas rejeitadas da temporada atual
+    standingsMap: null, // Cache para standings
+    clubsMap: null, // Cache para clubes
+    nextSeasonInjections: new Map(), // Type 100: stageId → [club objects] para injetar na próxima temporada (funciona como type 106 entre temporadas)
     
 formations: {
     '4-3-3': { positions: [1, 3, 4, 4, 2, 5, 8, 8, 6, 7, 9] },
@@ -151,18 +154,8 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
                 }
             });
             
-            club.competitions.forEach(compId => {
-                const stagesDaCompeticao = this.competitionStages.filter(s => {
-                    const stageCompIds = s.competitionId.split(',').map(id => id.trim());
-                    return stageCompIds.includes(compId);
-                });
-                
-                stagesDaCompeticao.forEach(stage => {
-                    if (!club.stages.includes(stage.id)) {
-                        club.stages.push(stage.id);
-                    }
-                });
-            });
+            // Stages são atribuídos APENAS pelo CompetitionStageClub
+            // A progressão entre stages é feita pelo sistema de transições (CompetitionStageTransition)
             
             club.originalCompetitions = [...club.competitions];
             club.originalStages = [...club.stages];
@@ -187,6 +180,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
     async init() {
         await this.loadDB();
         if (!this.db) return;
+        this.buildClubsMap();
         this.setupTabs();
         this.populateSelects();
         this.setupEventListeners();
@@ -250,7 +244,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         const stages = this.competitionStages.filter(s => {
             const competitionIds = s.competitionId.split(',').map(id => id.trim());
             return competitionIds.includes(competition.id);
-        }).sort((a, b) => a.startingWeek - b.startingWeek);
+        }).sort((a, b) => a.startingWeek - b.startingWeek || Number(a.id) - Number(b.id));
         
         if (stages.length === 0) {
             return null;
@@ -266,48 +260,58 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         let qualifiedTeams = new Map();
         
         for (const stage of stages) {
-            if (sharedStageResults.has(stage.id)) {
-                const stageResult = sharedStageResults.get(stage.id);
-                competitionResult.stages.push(stageResult);
-                continue;
-            }
-            
+            let stageResult;
             let teams = [];
             
-            // Pega times base: ou qualificados de stage anterior, ou times que têm esse stage
-            const baseTeams = qualifiedTeams.has(stage.id)
-                ? qualifiedTeams.get(stage.id)
-                : this.clubs.filter(club => club.stages.includes(stage.id));
-            
-            // Pega times injetados de outras competições via type 106
-            const extraTeams = crossQualified.get(stage.id) || [];
-            
-            // Se não tem times base MAS tem times injetados, usa só os injetados
-            // Se tem ambos, combina sem duplicar
-            if (baseTeams.length === 0 && extraTeams.length > 0) {
-                teams = extraTeams;
+            if (sharedStageResults.has(stage.id)) {
+                // Stage já simulado por outra competição - reutiliza resultado
+                // MAS continua processando transições para manter a cadeia de classificação
+                stageResult = sharedStageResults.get(stage.id);
+                competitionResult.stages.push(stageResult);
+                
+                // Reconstrói lista de times a partir do resultado cacheado (para place=-1)
+                teams = this.getAllTeamsFromStage(stage, stageResult.standings, stageResult.groups, stageResult.playoffBracket)
+                    .map(t => this.getClub(t.id)).filter(Boolean);
             } else {
+                // SEMPRE combina: times do CompetitionStageClub + qualificados de transições + injetados (type 106)
+                let assignedTeams = this.clubs.filter(club => club.stages.includes(stage.id));
+                
+                // Para competições type 2, playoff stages (stageType 1) devem receber times
+                // APENAS via transições da temporada atual, não de club.stages persistidos
+                // de temporadas anteriores. Só mantém times originalmente atribuídos no DB.
+                if (competition.type === 2 && stage.stageType === 1) {
+                    assignedTeams = assignedTeams.filter(club => club.originalStages.includes(stage.id));
+                }
+                
+                const qualifiedFromTransitions = qualifiedTeams.get(stage.id) || [];
+                const extraTeams = crossQualified.get(stage.id) || [];
+                
+                // Combina todas as fontes sem duplicar
                 const unique = new Map();
-                [...baseTeams, ...extraTeams].forEach(t => { if (t && !unique.has(t.id)) unique.set(t.id, t); });
+                [...assignedTeams, ...qualifiedFromTransitions, ...extraTeams].forEach(t => { 
+                    if (t && !unique.has(t.id)) unique.set(t.id, t); 
+                });
                 teams = Array.from(unique.values());
+                
+                if (extraTeams.length) { 
+                    try { 
+                        console.log("[Stage", stage.id, competition.name, "] injected via 106:", extraTeams.map(t=>t.name), "| Total teams:", teams.length); 
+                    } catch(_){} 
+                }
+                
+                if (teams.length === 0) {
+                    continue;
+                }
+                
+                stageResult = await this.simulateStage(stage, teams);
+                sharedStageResults.set(stage.id, stageResult);
+                competitionResult.stages.push(stageResult);
             }
             
-            if (extraTeams.length) { 
-                try { 
-                    console.log("[Stage", stage.id, competition.name, "] injected via 106:", extraTeams.map(t=>t.name), "| Total teams:", teams.length); 
-                } catch(_){} 
-            }
-            
-            if (teams.length === 0) {
-                continue;
-            }
-            
-            const stageResult = await this.simulateStage(stage, teams);
-            
-            sharedStageResults.set(stage.id, stageResult);
-            competitionResult.stages.push(stageResult);
+            // SEMPRE processa avanço de playoffs e transições (mesmo para stages cacheados)
             
             // Se foi um playoff, avança vencedores automaticamente para o próximo playoff stage
+            // (funciona como fallback caso não haja transições explícitas definidas)
             if (stage.stageType === 1 && stageResult.playoffData?.winners?.length > 0) {
                 const nextPlayoffStage = this.findNextPlayoffStage(stage, competition);
                 if (nextPlayoffStage) {
@@ -324,12 +328,14 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
                 }
             }
             
+            // Processar transições explícitas (CompetitionStageTransition)
             const transitions = this.competitionStageTransitions.filter(t => t.stageIdFrom === stage.id);
             
             for (const transition of transitions) {
                 let teamsToTransfer = [];
                 
                 if (transition.place === -1) {
+                    // place -1 = TODOS os times que participaram do stage
                     teamsToTransfer = teams.map(team => this.getClub(team.id)).filter(Boolean);
                 } else {
                     teamsToTransfer = this.getTeamsByPosition(stage, transition.place, stageResult.standings, stageResult.groups, stageResult.playoffBracket)
@@ -375,7 +381,10 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
                     competitionResult.championId = stageResult.standings?.[0]?.id || null;
                 } else if (stage.stageType === 1 && stageResult.playoffBracket) {
                     const finalRound = stageResult.playoffBracket[stageResult.playoffBracket.length - 1];
-                    if (finalRound.matches && finalRound.matches.length > 0) {
+if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
+
+
+
                         const winner = finalRound.matches[0].winner;
                         if (winner && !winner.isBye) {
                             competitionResult.championId = winner.id;
@@ -414,8 +423,11 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
             cleanSheets: 0
         }));
         
+        // Criar Map para acesso O(1) ao invés de find O(n)
+        const clubsStatsMap = new Map(stageResult.clubsStats.map(s => [s.id, s]));
+        
         if (stage.stageType === 1) {
-            const playoffData = await this.simulatePlayoff(teams, stage);
+            const playoffData = this.simulatePlayoff(teams, stage);
             stageResult.playoffBracket = playoffData.bracket;
             stageResult.playoffData = playoffData;
             stageResult.standings = this.getPlayoffTeamsInOrder(playoffData.bracket, playoffData.winners);
@@ -427,7 +439,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
             
             for (const roundMatches of stageResult.schedule) {
                 for (const match of roundMatches) {
-                    await this.playMatch(match, stageResult.clubsStats);
+                    this.playMatch(match, stageResult.clubsStats, clubsStatsMap);
                 }
             }
             
@@ -436,11 +448,11 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         }
         else if (stage.stageType === 3) {
             // Grupos onde times jogam contra todos os times dos OUTROS grupos
-            stageResult.groups = await this.simulateCrossGroupStage(teams, stage);
+            stageResult.groups = this.simulateCrossGroupStage(teams, stage);
             stageResult.standings = this.consolidateGroupStandings(stageResult.groups);
         }
         else if (stage.numGroups > 1) {
-            stageResult.groups = await this.simulateGroupStage(teams, stage);
+            stageResult.groups = this.simulateGroupStage(teams, stage);
             stageResult.standings = this.consolidateGroupStandings(stageResult.groups);
         }
         else {
@@ -449,7 +461,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
             
             for (const roundMatches of stageResult.schedule) {
                 for (const match of roundMatches) {
-                    await this.playMatch(match, stageResult.clubsStats);
+                    this.playMatch(match, stageResult.clubsStats, clubsStatsMap);
                 }
             }
             
@@ -512,18 +524,29 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
     },
 
     findNextPlayoffStage(currentStage, competition) {
-        // Encontra o próximo stage de playoff (stageType=1) com ID maior dentro da mesma competição
+        // Encontra o PRÓXIMO stage de playoff (stageType=1) dentro da mesma competição
+        // Usa startingWeek para ordenar (IDs são strings, comparação léxica falha)
         const competitionIds = competition.id.split(',').map(id => id.trim());
         
-        return this.competitionStages.find(stage => {
-            if (stage.stageType !== 1) return false; // Deve ser playoff
-            if (stage.id <= currentStage.id) return false; // Deve ter ID maior
+        const candidates = this.competitionStages.filter(stage => {
+            if (stage.stageType !== 1) return false;
+            if (stage.id === currentStage.id) return false;
+            // Usar startingWeek para ordenação (numérico, confiável)
+            if (stage.startingWeek < currentStage.startingWeek) return false;
+            // Se mesmo startingWeek, usar ID numérico como desempate
+            if (stage.startingWeek === currentStage.startingWeek && Number(stage.id) <= Number(currentStage.id)) return false;
             
             const stageCompIds = stage.competitionId.split(',').map(id => id.trim());
-            const isInSameCompetition = stageCompIds.some(id => competitionIds.includes(id));
-            
-            return isInSameCompetition;
+            return stageCompIds.some(id => competitionIds.includes(id));
         });
+        
+        if (candidates.length === 0) return null;
+        
+        // Retorna o mais próximo (menor startingWeek, ou menor ID como desempate)
+        return candidates.sort((a, b) => {
+            if (a.startingWeek !== b.startingWeek) return a.startingWeek - b.startingWeek;
+            return Number(a.id) - Number(b.id);
+        })[0];
     },
 
     getAllTeamsFromPlayoff(playoffBracket) {
@@ -537,7 +560,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         return Array.from(teams.values());
     },
 
-    async simulateGroupStage(teams, stage) {
+    simulateGroupStage(teams, stage) {
         const groups = [];
         const numGroups = stage.numGroups || 1;
         const teamsPerGroup = Math.floor(teams.length / numGroups);
@@ -582,7 +605,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         return groups;
     },
 
-    async simulateCrossGroupStage(teams, stage) {
+    simulateCrossGroupStage(teams, stage) {
         // stageType 3: Times jogam contra todos os times dos OUTROS grupos
         const groups = [];
         const numGroups = stage.numGroups || 2;
@@ -706,7 +729,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         return schedule;
     },
 
-    async simulatePlayoff(teams, stage) {
+    simulatePlayoff(teams, stage) {
         const numLegs = stage.numLegs || 1;
         const bracket = [];
         
@@ -968,7 +991,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         );
     },
 
-    async playMatch(match, clubsStats) {
+    playMatch(match, clubsStats, clubsStatsMap) {
         const homeClub = this.getClub(match.home);
         const awayClub = this.getClub(match.away);
         if (!homeClub || !awayClub) return;
@@ -1013,8 +1036,9 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         
         this.updateStandings(homeClub.id, awayClub.id, homeScore, awayScore, homeExpected, awayExpected);
         
-        const homeClubStats = clubsStats.find(s => s.id === match.home);
-        const awayClubStats = clubsStats.find(s => s.id === match.away);
+        // Usar Map para acesso O(1) ao invés de find O(n)
+        const homeClubStats = clubsStatsMap ? clubsStatsMap.get(match.home) : clubsStats.find(s => s.id === match.home);
+        const awayClubStats = clubsStatsMap ? clubsStatsMap.get(match.away) : clubsStats.find(s => s.id === match.away);
         if (homeClubStats) {
             homeClubStats.expectedGoalsFor += homeExpected;
             homeClubStats.expectedGoalsAgainst += awayExpected;
@@ -1226,9 +1250,9 @@ calculateTeamRating(clubId, lineup) {
     let totalRating = 0;
     lineup.forEach(player => {
         let rating = player.rating;
-        // Penalidade se jogador está fora de posição
+        // Penalidade de -10 se jogador está fora de posição (não afeta stats permanentes)
         if (player.positionMismatch) {
-            rating -= 5;
+            rating -= 10;
         }
         totalRating += rating;
     });
@@ -1237,6 +1261,7 @@ calculateTeamRating(clubId, lineup) {
 },
 
 // Calcular ataque/defesa do time
+// Usa lineupRole (posição na escalação) para categorizar, não o role original do jogador
 calculateTeamStats(clubId, lineup) {
     const defaultStats = { attack: 50, defense: 50, midfield: 50, goalkeeper: 50 };
     if (!lineup || lineup.length === 0) return defaultStats;
@@ -1244,10 +1269,12 @@ calculateTeamStats(clubId, lineup) {
     const stats = { attack: [], defense: [], midfield: [], goalkeeper: [] };
     
     lineup.forEach(player => {
-        const roleInfo = this.roleMap[player.role];
+        // Usar lineupRole (posição na escalação) para categorizar corretamente
+        const roleInfo = this.roleMap[player.lineupRole];
         if (roleInfo) {
             let rating = player.rating;
-            if (player.positionMismatch) rating -= 5;
+            // Penalidade de -10 se jogador está fora de posição (não afeta stats permanentes)
+            if (player.positionMismatch) rating -= 10;
             stats[roleInfo.category].push(rating);
         }
     });
@@ -1266,7 +1293,7 @@ calcExpectedGoalsNew(teamStats, oppStats, isHome = false) {
     const atk = (teamStats.attack + teamStats.midfield) / 2 + (isHome ? F : 0);
     const def = (oppStats.defense + oppStats.goalkeeper) / 2 + (isHome ? 0 : F);
     const diff = atk - def;
-    return Math.max(1.2 + 0.04 * Math.sign(diff) * (Math.abs(diff) ** 1.2), 0.1);
+    return Math.max(1.2 + 0.05 * Math.sign(diff) * (Math.abs(diff) ** 1.2), 0.1);
 },
 
 // Atribuir formação fixa a um time (se ainda não tem)
@@ -1352,16 +1379,43 @@ calculateFormationAverages(clubId) {
     };
 },
 
+// Cache de jogadores por clube
+playersByClubCache: null,
+
+buildPlayersByClubCache() {
+    this.playersByClubCache = new Map();
+    this.players.forEach(p => {
+        if (p.retired) return;
+        if (!this.playersByClubCache.has(p.clubId)) {
+            this.playersByClubCache.set(p.clubId, []);
+        }
+        this.playersByClubCache.get(p.clubId).push(p);
+    });
+},
+
+getClubPlayers(clubId) {
+    if (!this.playersByClubCache) this.buildPlayersByClubCache();
+    return this.playersByClubCache.get(clubId) || [];
+},
+
+invalidatePlayerCache() {
+    this.playersByClubCache = null;
+},
+
 // Escalar time - escolhe melhores jogadores para formação FIXA do time
+// Prioriza: 1) jogador na posição correta com maior overall
+//           2) se não houver, pega jogador com maior overall disponível (com penalidade de -10 na partida)
 selectLineup(clubId) {
-    const clubPlayers = this.players.filter(p => p.clubId === clubId && !p.retired);
+    let clubPlayers = this.getClubPlayers(clubId);
     
     if (clubPlayers.length < 11) {
         // Gerar jogadores fictícios se necessário
-        this.generateFicticiousPlayers(clubId, 16 - clubPlayers.length);
+        this.generateFicticiousPlayers(clubId, 20 - clubPlayers.length);
+        this.invalidatePlayerCache();
+        clubPlayers = this.getClubPlayers(clubId);
     }
     
-    const availablePlayers = this.players.filter(p => p.clubId === clubId && !p.retired);
+    const availablePlayers = [...clubPlayers]; // Cópia para não modificar original
     
     // Usar formação FIXA do time
     const formationKey = this.getClubFormation(clubId);
@@ -1370,38 +1424,62 @@ selectLineup(clubId) {
     const lineup = [];
     const usedPlayers = new Set();
     
-    // Para cada posição da formação, encontrar melhor jogador
-    formation.positions.forEach((requiredRole, index) => {
-        // Primeiro tenta jogador na posição correta
+    // PASSO 1: Para cada posição, primeiro tenta preencher com jogador da posição correta
+    const positionsNeeded = formation.positions.map((requiredRole, index) => ({
+        index,
+        requiredRole,
+        filled: false,
+        player: null
+    }));
+    
+    // Ordenar jogadores por rating (maior primeiro) para garantir que os melhores são escalados primeiro
+    const sortedAvailable = availablePlayers
+        .filter(p => !p.retired)
+        .sort((a, b) => b.rating - a.rating);
+    
+    // PASSO 2: Primeiro, alocar jogadores nas posições CORRETAS (maior overall primeiro)
+    sortedAvailable.forEach(player => {
+        if (usedPlayers.has(player.id)) return;
+        
+        // Encontrar posição que precisa desse role e ainda não está preenchida
+        const matchingPosition = positionsNeeded.find(pos => 
+            !pos.filled && pos.requiredRole === player.role
+        );
+        
+        if (matchingPosition) {
+            matchingPosition.filled = true;
+            matchingPosition.player = { ...player, positionMismatch: false, lineupRole: matchingPosition.requiredRole };
+            usedPlayers.add(player.id);
+        }
+    });
+    
+    // PASSO 3: Preencher posições vazias com jogadores restantes (maior overall primeiro, com penalidade)
+    positionsNeeded.forEach(pos => {
+        if (pos.filled) return;
+        
+        // Encontrar jogador com maior rating que ainda não foi usado
         let bestPlayer = null;
         let bestRating = -1;
-        let positionMismatch = false;
         
-        availablePlayers.forEach(player => {
+        sortedAvailable.forEach(player => {
             if (usedPlayers.has(player.id)) return;
-            
-            if (player.role === requiredRole && player.rating > bestRating) {
+            if (player.rating > bestRating) {
                 bestPlayer = player;
                 bestRating = player.rating;
-                positionMismatch = false;
             }
         });
         
-        // Se não achou, pega qualquer jogador disponível
-        if (!bestPlayer) {
-            availablePlayers.forEach(player => {
-                if (usedPlayers.has(player.id)) return;
-                if (player.rating > bestRating) {
-                    bestPlayer = player;
-                    bestRating = player.rating;
-                    positionMismatch = true;
-                }
-            });
-        }
-        
         if (bestPlayer) {
+            pos.filled = true;
+            pos.player = { ...bestPlayer, positionMismatch: true, lineupRole: pos.requiredRole };
             usedPlayers.add(bestPlayer.id);
-            lineup.push({ ...bestPlayer, positionMismatch, lineupRole: requiredRole });
+        }
+    });
+    
+    // Montar lineup na ordem correta
+    positionsNeeded.forEach(pos => {
+        if (pos.player) {
+            lineup.push(pos.player);
         }
     });
     
@@ -1421,18 +1499,17 @@ generateFicticiousPlayers(clubId, count) {
     const defaultFirstNames = ['João', 'Pedro', 'Lucas', 'Gabriel', 'Carlos', 'André', 'Rafael', 'Bruno', 'Thiago', 'Felipe'];
     const defaultLastNames = ['Silva', 'Santos', 'Oliveira', 'Souza', 'Pereira', 'Costa', 'Ferreira', 'Rodrigues', 'Almeida', 'Lima'];
     
-    // Distribuição mínima de posições: 1 GOL, 2 LE, 2 LD, 2 VL, 5 MO, 2 PE, 2 PD, 2 AT = 18 jogadores
-    const minPositions = {
-        1: 2,  // GOL
-        2: 2,  // LD
-        3: 2,  // LE
-        4: 3, // ZG
-        5: 2,  // VL
-        6: 2,  // PE
-        7: 2,  // PD
-        8: 5,  // MO
-        9: 2   // AT
-    };
+const minPositions = {
+    1: 2,
+    2: 3,
+    3: 3,
+    4: 4,
+    5: 3,
+    6: 3,
+    7: 3,
+    8: 4,
+    9: 4
+};
     
     // Verificar jogadores existentes no clube
     const existingPlayers = this.players.filter(p => p.clubId === clubId && !p.retired);
@@ -1505,7 +1582,7 @@ generateFicticiousPlayers(clubId, count) {
         
         // Idade entre 17 e 35
         const currentYear = new Date().getFullYear() + this.seasonHistory.length;
-        const age = 15 + Math.floor(Math.random() * 4);
+        const age = 22 + Math.floor(Math.random() * 4);
         const dob = currentYear - age;
         
         const newPlayer = {
@@ -1527,6 +1604,12 @@ generateFicticiousPlayers(clubId, count) {
 // Seleção ponderada por peso
 weightedRandomSelect(items) {
     const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
+    
+    if (totalWeight === 0) {
+        // todos iguais → random puro
+        return items[Math.floor(Math.random() * items.length)].name;
+    }
+    
     let random = Math.random() * totalWeight;
     
     for (const item of items) {
@@ -1538,16 +1621,19 @@ weightedRandomSelect(items) {
 },
 
 // Simular quem marcou os gols
+// Usa lineupRole para calcular fator de gols baseado na posição escalada
 simulateGoalScorers(lineup, goals) {
     if (goals === 0 || lineup.length === 0) return [];
     
     const scorers = [];
     
     // Calcular peso de cada jogador para marcar gol
+    // Usar lineupRole (posição na escalação) para o fator, não o role original
     const weights = lineup.map(player => {
-        const roleInfo = this.roleMap[player.role] || { factor: 1.0 };
+        const roleInfo = this.roleMap[player.lineupRole] || { factor: 1.0 };
         let rating = player.rating;
-        if (player.positionMismatch) rating -= 5;
+        // Penalidade de -10 se jogador está fora de posição
+        if (player.positionMismatch) rating -= 10;
         return { player, weight: rating * roleInfo.factor };
     });
     
@@ -1557,7 +1643,7 @@ simulateGoalScorers(lineup, goals) {
         let scorer = null;
         
         weights.forEach(({ player, weight }) => {
-            const lambda = weight / 100; // Normalizar para poisson
+            const lambda = weight / 50; // Normalizar para poisson
             const poissonValue = this.poisson(lambda) + Math.random(); // Adicionar aleatoriedade
             if (poissonValue > maxPoisson) {
                 maxPoisson = poissonValue;
@@ -1575,10 +1661,34 @@ simulateGoalScorers(lineup, goals) {
     return scorers;
 },
 
+// Cache para stats do ano atual - reiniciado no início de cada temporada
+playerStatsCache: null,
+currentStatsYear: 0,
+
+getPlayerStatsCacheKey(playerId, year) {
+    return `${playerId}_${year}`;
+},
+
+ensurePlayerStatsCache() {
+    const currentYear = this.seasonHistory.length + 1;
+    if (this.currentStatsYear !== currentYear || !this.playerStatsCache) {
+        this.playerStatsCache = new Map();
+        this.currentStatsYear = currentYear;
+        // Popular cache com stats existentes do ano atual
+        this.playerStats.forEach(s => {
+            if (s.year === currentYear) {
+                this.playerStatsCache.set(this.getPlayerStatsCacheKey(s.playerId, s.year), s);
+            }
+        });
+    }
+},
+
 // Adicionar gol às estatísticas do jogador
 addPlayerGoal(playerId) {
+    this.ensurePlayerStatsCache();
     const currentYear = this.seasonHistory.length + 1;
-    let stat = this.playerStats.find(s => s.playerId === playerId && s.year === currentYear);
+    const cacheKey = this.getPlayerStatsCacheKey(playerId, currentYear);
+    let stat = this.playerStatsCache.get(cacheKey);
     
     if (!stat) {
         const player = this.players.find(p => p.id === playerId);
@@ -1590,6 +1700,7 @@ addPlayerGoal(playerId) {
             games: 0
         };
         this.playerStats.push(stat);
+        this.playerStatsCache.set(cacheKey, stat);
     }
     
     stat.goals++;
@@ -1597,8 +1708,10 @@ addPlayerGoal(playerId) {
 
 // Adicionar jogo às estatísticas do jogador
 addPlayerGame(playerId) {
+    this.ensurePlayerStatsCache();
     const currentYear = this.seasonHistory.length + 1;
-    let stat = this.playerStats.find(s => s.playerId === playerId && s.year === currentYear);
+    const cacheKey = this.getPlayerStatsCacheKey(playerId, currentYear);
+    let stat = this.playerStatsCache.get(cacheKey);
     
     if (!stat) {
         const player = this.players.find(p => p.id === playerId);
@@ -1610,6 +1723,7 @@ addPlayerGame(playerId) {
             games: 0
         };
         this.playerStats.push(stat);
+        this.playerStatsCache.set(cacheKey, stat);
     }
     
     stat.games++;
@@ -1640,7 +1754,7 @@ evolvePlayersEndOfSeason() {
         // Evolução até o potencial
         if (player.rating < player.ratingPotential && age < 30) {
             const growthFactor = age < 23 ? 3 : (age < 27 ? 2 : 1);
-            const maxGrowth = (player.ratingPotential - player.rating) * 0.2;
+            const maxGrowth = (player.ratingPotential - player.rating) * 0.45;
             const growth = Math.random() * growthFactor * maxGrowth / 3;
             player.rating = Math.min(player.ratingPotential, player.rating + growth);
         }
@@ -2011,7 +2125,7 @@ executeTransfer(player, sellingClub, buyingClub, value) {
     const sellerPlayers = this.players.filter(p => p.clubId === sellingClub.id && !p.retired && p.id !== player.id);
     const samePositionPlayers = sellerPlayers.filter(p => p.role === player.role);
     
-    if (samePositionPlayers.length < 1 || sellerPlayers.length < 16) return false;
+    if (samePositionPlayers.length < 1 || sellerPlayers.length < 20) return false;
     if (buyingClub.transferBalance < value) return false;
     
     player.clubId = buyingClub.id;
@@ -2045,6 +2159,8 @@ getTransferReport() {
         
         return {
             player: player?.name || 'Desconhecido',
+            playerId: t.playerId,
+            playerCountryId: player?.countryId || null,
             from: fromClub?.name || 'Desconhecido',
             fromId: t.fromClub,
             to: toClub?.name || 'Desconhecido',
@@ -2071,17 +2187,22 @@ getRejectedOffersReport() {
         }
     });
     
-    return Array.from(uniqueRejections.values()).map(offer => ({
-        player: offer.playerName,
-        from: offer.fromClubName,
-        fromId: offer.fromClubId,
-        to: offer.toClubName,
-        toId: offer.toClubId,
-        offerValue: this.formatValue(offer.offerValue),
-        askingPrice: this.formatValue(offer.askingPrice),
-        reason: this.getReasonText(offer.reason),
-        status: 'rejected'
-    }));
+    return Array.from(uniqueRejections.values()).map(offer => {
+        const player = this.players.find(p => p.id === offer.playerId);
+        return {
+            player: offer.playerName,
+            playerId: offer.playerId,
+            playerCountryId: player?.countryId || null,
+            from: offer.fromClubName,
+            fromId: offer.fromClubId,
+            to: offer.toClubName,
+            toId: offer.toClubId,
+            offerValue: this.formatValue(offer.offerValue),
+            askingPrice: this.formatValue(offer.askingPrice),
+            reason: this.getReasonText(offer.reason),
+            status: 'rejected'
+        };
+    });
 },
 
 // Texto legível para o motivo da rejeição
@@ -2101,7 +2222,7 @@ calcPlayerValue(player) {
     const age = currentYear - player.dob;
     
     const a = 3.4;
-    const b = 0.188;
+    const b = 0.196;
     let base = a * Math.exp(b * player.rating);
     
     // Correção de rating baixo (igual ao original)
@@ -2342,7 +2463,12 @@ distributeAwards(stageId, standings) {
 },
 
     getClub(id) { 
+        if (this.clubsMap) return this.clubsMap.get(id);
         return this.clubs.find(c => c.id === id); 
+    },
+
+    buildClubsMap() {
+        this.clubsMap = new Map(this.clubs.map(c => [c.id, c]));
     },
 
     async loadLogo(id) {
@@ -2350,12 +2476,29 @@ distributeAwards(stageId, standings) {
         if (!this.zipData) return "";
         try {
             const file = this.zipData.file(`club_logos/${id}.png`);
-            if (!file) return "";
+            if (!file) { this.logoCache.set(id, ""); return ""; }
             const blob = await file.async("blob");
             const url = URL.createObjectURL(blob);
             this.logoCache.set(id, url); 
             return url;
         } catch (e) { 
+            this.logoCache.set(id, "");
+            return ""; 
+        }
+    },
+
+    async loadFlag(countryId) {
+        if (this.flagCache.has(countryId)) return this.flagCache.get(countryId);
+        if (!this.zipData) return "";
+        try {
+            const file = this.zipData.file(`country_flags/${countryId}.png`);
+            if (!file) { this.flagCache.set(countryId, ""); return ""; }
+            const blob = await file.async("blob");
+            const url = URL.createObjectURL(blob);
+            this.flagCache.set(countryId, url); 
+            return url;
+        } catch (e) { 
+            this.flagCache.set(countryId, "");
             return ""; 
         }
     },
@@ -2424,14 +2567,13 @@ distributeAwards(stageId, standings) {
         // Garantir que todos os times tenham pelo menos 16 jogadores
         this.clubs.forEach(club => {
             const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
-            if (clubPlayers.length < 16) {
-                this.generateFicticiousPlayers(club.id, 16 - clubPlayers.length);
+            if (clubPlayers.length < 20) {
+                this.generateFicticiousPlayers(club.id, 20 - clubPlayers.length);
             }
         });
         
-        this.resetContinentalQualifications();
-        
         // Simular TODAS as competições de TODOS os países
+        // (Reset de classificações é feito NO FINAL da temporada, após aplicar promoções)
         const allCompetitions = [...this.competitions].sort((a, b) => {
             // Ordenar por país e depois por importanceOrder
             if (a.countryId !== b.countryId) {
@@ -2453,6 +2595,24 @@ distributeAwards(stageId, standings) {
         
         const sharedStageResults = new Map();
         const crossQualified = new Map();
+        
+        // Injetar times qualificados via type 100 da temporada anterior
+        // Funciona exatamente como type 106, mas entre temporadas
+        if (this.nextSeasonInjections.size > 0) {
+            this.nextSeasonInjections.forEach((clubs, stageId) => {
+                if (!crossQualified.has(stageId)) {
+                    crossQualified.set(stageId, []);
+                }
+                const list = crossQualified.get(stageId);
+                clubs.forEach(club => {
+                    if (!list.find(c => c.id === club.id)) {
+                        list.push(club);
+                    }
+                });
+            });
+            // Limpar após usar
+            this.nextSeasonInjections = new Map();
+        }
         
         for (const competition of allCompetitions) {
             let competitionResult;
@@ -2484,6 +2644,11 @@ distributeAwards(stageId, standings) {
             return null;
         }
         
+        // PRIMEIRO limpar competições temporárias (tipos 0, 1, 3, 4)
+        // para que só quem se classificar novamente participe na próxima temporada
+        this.resetContinentalQualifications();
+        
+        // DEPOIS aplicar transições (type 100, etc.) para re-adicionar os times qualificados
         this.applyPromotionsAndRelegationsAllCountries(seasonResult);
         
         // Evoluir jogadores no final da temporada
@@ -2793,14 +2958,15 @@ distributeAwards(stageId, standings) {
     },
     
     handleContinentalQualification(club, targetStage, targetCompetitionIds) {
-        targetCompetitionIds.forEach(compId => {
-            if (!club.competitions.includes(compId)) {
-                club.competitions.push(compId);
-            }
-        });
-        
-        if (!club.stages.includes(targetStage.id)) {
-            club.stages.push(targetStage.id);
+        // Type 100 agora funciona como type 106, mas entre temporadas:
+        // NÃO modifica club.stages/competitions (isso causava bugs)
+        // Apenas adiciona ao mapa de injeções para a próxima temporada
+        if (!this.nextSeasonInjections.has(targetStage.id)) {
+            this.nextSeasonInjections.set(targetStage.id, []);
+        }
+        const injectionList = this.nextSeasonInjections.get(targetStage.id);
+        if (!injectionList.find(c => c.id === club.id)) {
+            injectionList.push(club);
         }
     },
     
@@ -2841,36 +3007,33 @@ distributeAwards(stageId, standings) {
     },
 
 resetContinentalQualifications() {
-    // Identificar apenas transições do Type 100 (competições continentais)
-    const continentalTransitions = this.competitionStageTransitions.filter(t => t.type === 100);
+    // Competições dos tipos 0, 1, 3, 4 precisam limpar todos os times no final da temporada
+    // Apenas quem se classificar novamente participa na próxima temporada
+    const typesToClear = [0, 1, 3, 4];
     
-    // Pegar apenas os stages destino das transições Type 100
-    const continentalStageIds = continentalTransitions.map(t => t.stageIdTo);
+    // Identificar competições que precisam ter times limpos
+    const competitionsToClear = this.competitions.filter(c => typesToClear.includes(c.type));
+    const competitionIdsToClear = competitionsToClear.map(c => c.id);
     
-    // Pegar as competições associadas a esses stages
-    const continentalCompIds = [];
-    continentalStageIds.forEach(stageId => {
-        const stage = this.competitionStages.find(s => s.id === stageId);
-        if (stage) {
-            const compIds = stage.competitionId.split(',').map(id => id.trim());
-            compIds.forEach(compId => {
-                if (!continentalCompIds.includes(compId)) {
-                    continentalCompIds.push(compId);
-                }
-            });
+    // Identificar stages dessas competições
+    const stagesToClear = [];
+    this.competitionStages.forEach(stage => {
+        const stageCompIds = stage.competitionId.split(',').map(id => id.trim());
+        if (stageCompIds.some(compId => competitionIdsToClear.includes(compId))) {
+            stagesToClear.push(stage.id);
         }
     });
     
-    // Remover APENAS as competições e stages continentais do Type 100
+    // Remover as competições e stages de TODOS os times
     this.clubs.forEach(club => {
-        // Remover competições continentais Type 100
+        // Remover competições dos tipos 0, 1, 3, 4
         club.competitions = club.competitions.filter(compId =>
-            !continentalCompIds.includes(compId)
+            !competitionIdsToClear.includes(compId)
         );
         
-        // Remover stages continentais Type 100  
+        // Remover stages dessas competições
         club.stages = club.stages.filter(stageId =>
-            !continentalStageIds.includes(stageId)
+            !stagesToClear.includes(stageId)
         );
     });
 },
@@ -3217,7 +3380,7 @@ competitionTypeNames: {
         sortedCompetitions.forEach(compData => {
             const option = document.createElement("option");
             option.value = compData.competition.id;
-            option.textContent = `${compData.competition.name} (D${compData.competition.importanceOrder})`;
+            option.textContent = `${compData.competition.name}`;
             competitionSelect.appendChild(option);
         });
         
@@ -3472,118 +3635,128 @@ competitionTypeNames: {
         const hasRejected = seasonData?.rejectedOffers?.length > 0;
         
         if (!hasTransfers && !hasRejected) {
-            container.innerHTML = `
-                <div class="section-card">
-                    <div class="section-header">
-                        <i class="fas fa-exchange-alt"></i>
-                        <h2>Transferências - T${this.currentSeason}</h2>
-                    </div>
-                    <p style="text-align: center; color: #888; padding: 10px;">Nenhuma transferência.</p>
-                </div>
-            `;
+            container.innerHTML = `  
+            <div class="section-card">  
+                <div class="section-header">  
+                    <i class="fas fa-exchange-alt"></i>  
+                    <h2>Transferências - T${this.currentSeason}</h2>  
+                </div>  
+                <p style="text-align: center; color: #888; padding: 10px;">Nenhuma transferência.</p>  
+            </div>  
+        `;
             return;
         }
         
-        // Carregar todos os logos de uma vez
+        // Carregar todos os logos e bandeiras de uma vez  
         const allClubIds = new Set();
+        const allCountryIds = new Set();
         if (seasonData.transfers) {
             seasonData.transfers.forEach(t => {
                 if (t.fromId) allClubIds.add(t.fromId);
                 if (t.toId) allClubIds.add(t.toId);
+                if (t.playerCountryId) allCountryIds.add(t.playerCountryId);
             });
         }
         if (seasonData.rejectedOffers) {
             seasonData.rejectedOffers.forEach(t => {
                 if (t.fromId) allClubIds.add(t.fromId);
                 if (t.toId) allClubIds.add(t.toId);
+                if (t.playerCountryId) allCountryIds.add(t.playerCountryId);
             });
         }
         
-        const logoMap = new Map();
-        await Promise.all(Array.from(allClubIds).map(async id => {
-            const logo = await this.loadLogo(id);
-            logoMap.set(id, logo);
-        }));
+        const [logoEntries, flagEntries] = await Promise.all([
+            Promise.all(Array.from(allClubIds).map(async id => [id, await this.loadLogo(id)])),
+            Promise.all(Array.from(allCountryIds).map(async id => [id, await this.loadFlag(id)]))
+        ]);
+        const logoMap = new Map(logoEntries);
+        const flagMap = new Map(flagEntries);
         
-        // Transferências concluídas
+        // Transferências concluídas  
         let transfersHtml = '';
         if (hasTransfers) {
             seasonData.transfers.forEach(transfer => {
                 const fromLogo = logoMap.get(transfer.fromId) || '';
                 const toLogo = logoMap.get(transfer.toId) || '';
+                const playerFlag = flagMap.get(transfer.playerCountryId) || '';
                 
-                transfersHtml += `
-                    <div style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #e8e8e8; font-size: 13px; background: #f8fff8;">
-                        <i class="fas fa-check-circle" style="color: #4CAF50; font-size: 12px;"></i>
-                        <span style="flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${transfer.player}</span>
-                        ${fromLogo ? `<img src="${fromLogo}" alt="" style="width: 20px; height: 20px; object-fit: contain;">` : '<span style="width:20px;"></span>'}
-                        <i class="fas fa-arrow-right" style="color: #4CAF50; font-size: 10px;"></i>
-                        ${toLogo ? `<img src="${toLogo}" alt="" style="width: 20px; height: 20px; object-fit: contain;">` : '<span style="width:20px;"></span>'}
-                        <span style="color: #2196F3; font-weight: 600; font-size: 12px; white-space: nowrap;">${transfer.value}</span>
-                    </div>
-                `;
+                transfersHtml += `  
+                <div style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #e8e8e8; font-size: 13px; background: #f8fff8;">  
+                    <i class="fas fa-check-circle" style="color: #4CAF50; font-size: 12px;"></i>  
+<span style="flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+    ${playerFlag ? `<img src="${playerFlag}" alt="" class="flag-icon">` : ''}${transfer.player}
+</span>
+                    ${fromLogo ? `<img src="${fromLogo}" alt="" style="width: 20px; height: 20px; object-fit: contain;">` : '<span style="width:20px;"></span>'}  
+                    <i class="fas fa-arrow-right" style="color: #4CAF50; font-size: 10px;"></i>  
+                    ${toLogo ? `<img src="${toLogo}" alt="" style="width: 20px; height: 20px; object-fit: contain;">` : '<span style="width:20px;"></span>'}  
+                    <span style="color: #2196F3; font-weight: 600; font-size: 12px; white-space: nowrap;">${transfer.value}</span>  
+                </div>  
+            `;
             });
         }
         
-        // Ofertas rejeitadas
+        // Ofertas rejeitadas  
         let rejectedHtml = '';
         if (hasRejected) {
             seasonData.rejectedOffers.forEach(offer => {
                 const fromLogo = logoMap.get(offer.fromId) || '';
                 const toLogo = logoMap.get(offer.toId) || '';
+                const playerFlag = flagMap.get(offer.playerCountryId) || '';
                 
-                rejectedHtml += `
-                    <div style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #f0e0e0; font-size: 12px; background: #fff8f8;">
-                        <i class="fas fa-times-circle" style="color: #e53935; font-size: 11px;"></i>
-                        <span style="flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #666;">${offer.player}</span>
-                        ${fromLogo ? `<img src="${fromLogo}" alt="" style="width: 18px; height: 18px; object-fit: contain; opacity: 0.7;">` : '<span style="width:18px;"></span>'}
-                        <i class="fas fa-arrow-right" style="color: #999; font-size: 9px;"></i>
-                        ${toLogo ? `<img src="${toLogo}" alt="" style="width: 18px; height: 18px; object-fit: contain; opacity: 0.7;">` : '<span style="width:18px;"></span>'}
-                        <span style="color: #e53935; font-size: 10px; white-space: nowrap;" title="Oferta: ${offer.offerValue} | Pedido: ${offer.askingPrice}">
-                            ${offer.offerValue} <i class="fas fa-ban" style="font-size: 8px;"></i>
-                        </span>
-                        <span style="background: #ffebee; color: #c62828; font-size: 9px; padding: 2px 4px; border-radius: 3px; white-space: nowrap;">
-                            ${offer.reason}
-                        </span>
-                    </div>
-                `;
+                rejectedHtml += `  
+                <div style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #f0e0e0; font-size: 12px; background: #fff8f8;">  
+                    <i class="fas fa-times-circle" style="color: #e53935; font-size: 11px;"></i>  
+<span style="flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #666;">
+    ${playerFlag ? `<img src="${playerFlag}" alt="" class="flag-icon-small">` : ''}${offer.player}
+</span>
+                    ${fromLogo ? `<img src="${fromLogo}" alt="" style="width: 18px; height: 18px; object-fit: contain; opacity: 0.7;">` : '<span style="width:18px;"></span>'}  
+                    <i class="fas fa-arrow-right" style="color: #999; font-size: 9px;"></i>  
+                    ${toLogo ? `<img src="${toLogo}" alt="" style="width: 18px; height: 18px; object-fit: contain; opacity: 0.7;">` : '<span style="width:18px;"></span>'}  
+                    <span style="color: #e53935; font-size: 10px; white-space: nowrap;" title="Oferta: ${offer.offerValue} | Pedido: ${offer.askingPrice}">  
+                        ${offer.offerValue} <i class="fas fa-ban" style="font-size: 8px;"></i>  
+                    </span>  
+                    <span style="background: #ffebee; color: #c62828; font-size: 9px; padding: 2px 4px; border-radius: 3px; white-space: nowrap;">  
+                        ${offer.reason}  
+                    </span>  
+                </div>  
+            `;
             });
         }
         
-        container.innerHTML = `
-            <div class="section-card" style="padding: 8px;">
-                <div class="section-header" style="margin-bottom: 8px;">
-                    <i class="fas fa-exchange-alt"></i>
-                    <span style="font-size: 14px; font-weight: 600;">Transferências - T${this.currentSeason}</span>
-                    <span style="margin-left: auto; font-size: 11px; color: #666;">
-                        <span style="color: #4CAF50;">${seasonData.transfers?.length || 0} ✓</span>
-                        ${hasRejected ? `<span style="color: #e53935; margin-left: 8px;">${seasonData.rejectedOffers.length} ✗</span>` : ''}
-                    </span>
-                </div>
-                
-                ${hasTransfers ? `
-                    <div style="margin-bottom: 12px;">
-                        <div style="font-size: 12px; font-weight: 600; color: #2e7d32; padding: 4px 8px; background: #e8f5e9; border-radius: 4px; margin-bottom: 4px;">
-                            <i class="fas fa-handshake"></i> Transferências Concluídas
-                        </div>
-                        <div style="max-height: 250px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px;">
-                            ${transfersHtml}
-                        </div>
-                    </div>
-                ` : ''}
-                
-                ${hasRejected ? `
-                    <div>
-                        <div style="font-size: 12px; font-weight: 600; color: #c62828; padding: 4px 8px; background: #ffebee; border-radius: 4px; margin-bottom: 4px;">
-                            <i class="fas fa-ban"></i> Ofertas Rejeitadas
-                        </div>
-                        <div style="max-height: 200px; overflow-y: auto; border: 1px solid #f0e0e0; border-radius: 4px;">
-                            ${rejectedHtml}
-                        </div>
-                    </div>
-                ` : ''}
-            </div>
-        `;
+        container.innerHTML = `  
+        <div class="section-card" style="padding: 8px;">  
+            <div class="section-header" style="margin-bottom: 8px;">  
+                <i class="fas fa-exchange-alt"></i>  
+                <span style="font-size: 14px; font-weight: 600;">Transferências - T${this.currentSeason}</span>  
+                <span style="margin-left: auto; font-size: 11px; color: #666;">  
+                    <span style="color: #4CAF50;">${seasonData.transfers?.length || 0} ✓</span>  
+                    ${hasRejected ? `<span style="color: #e53935; margin-left: 8px;">${seasonData.rejectedOffers.length} ✗</span>` : ''}  
+                </span>  
+            </div>  
+              
+            ${hasTransfers ? `  
+                <div style="margin-bottom: 12px;">  
+                    <div style="font-size: 12px; font-weight: 600; color: #2e7d32; padding: 4px 8px; background: #e8f5e9; border-radius: 4px; margin-bottom: 4px;">  
+                        <i class="fas fa-handshake"></i> Transferências Concluídas  
+                    </div>  
+                    <div style="max-height: 250px; overflow-y: auto; border-radius: 4px;">  
+                        ${transfersHtml}  
+                    </div>  
+                </div>  
+            ` : ''}  
+              
+            ${hasRejected ? `  
+                <div>  
+                    <div style="font-size: 12px; font-weight: 600; color: #c62828; padding: 4px 8px; background: #ffebee; border-radius: 4px; margin-bottom: 4px;">  
+                        <i class="fas fa-ban"></i> Ofertas Rejeitadas  
+                    </div>  
+                    <div style="max-height: 200px; overflow-y: auto; border-radius: 4px;">  
+                        ${rejectedHtml}  
+                    </div>  
+                </div>  
+            ` : ''}  
+        </div>  
+    `;
     },
 
 
@@ -4313,7 +4486,7 @@ getRelevantTransitions() {
         const team = this.getClub(teamId);
         if (!team) return;
         
-        this.loadLogo(teamId).then(logo => {
+        Promise.all([this.loadLogo(teamId), this.loadFlag(team.countryId)]).then(([logo, flag]) => {
             const country = this.countries.find(c => String(c.id) === String(team.countryId))?.name || '-';
             
             const competitionsText = team.competitions.map(compId => {
@@ -4354,7 +4527,10 @@ getRelevantTransitions() {
     ${team.name}
 </div>
             <p><i class="fas fa-info-circle"></i> <strong>Tipo:</strong> ${teamRelation}</p>
-            <p><i class="fas fa-flag"></i> <strong>País:</strong> ${country}</p>
+<p>
+    <i class="fas fa-flag"></i> <strong>País:</strong> 
+    ${flag ? `<img src="${flag}" alt="" class="flag-icon">` : ''}${country}
+</p>
             <p><i class="fas fa-trophy"></i> <strong>Competições:</strong> ${competitionsText}</p>
             <p><i class="fas fa-star"></i> <strong>Rating:</strong> ${team.originalRating.toFixed(1)}</p>
             <p><i class="fas fa-money-bill-wave"></i> <strong>Balanço:</strong> ${this.formatValue(team.transferBalance || 0)}</p>
@@ -4379,76 +4555,86 @@ getRelevantTransitions() {
     },
     
     // Nova função: Mostrar elenco do time
-    showTeamSquad(teamId) {
-        const team = this.getClub(teamId);
-        if (!team) return;
+async showTeamSquad(teamId) {
+    const team = this.getClub(teamId);
+    if (!team) return;
+    
+    const teamPlayers = this.players
+        .filter(p => p.clubId === teamId && !p.retired)
+        .sort((a, b) => a.role - b.role || b.rating - a.rating);
+    
+    // Pré-carregar todas as bandeiras dos jogadores
+    const countryIds = [...new Set(teamPlayers.map(p => p.countryId).filter(Boolean))];
+    const flagMap = new Map();
+    await Promise.all(countryIds.map(async cId => {
+        flagMap.set(cId, await this.loadFlag(cId));
+    }));
+    
+    let squadHTML = '';
+    
+    if (teamPlayers.length > 0) {
+        const currentYear = new Date().getFullYear() + this.seasonHistory.length;
         
-        const teamPlayers = this.players
-            .filter(p => p.clubId === teamId && !p.retired)
-            .sort((a, b) => a.role - b.role || b.rating - a.rating);
+        squadHTML = `
+        <div style="max-height: 400px; overflow-y: auto;">
+            <table class="standings-table" style="width: 100%; margin-top: 10px;">
+                <thead>
+                    <tr>
+                        <th>Pos</th>
+                        <th style="min-width: 150px;">Nome</th>
+                        <th>Idade</th>
+                        <th>OVR</th>
+                        <th>POT</th>
+                        <th>Valor</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
         
-        let squadHTML = '';
-        
-        if (teamPlayers.length > 0) {
-            const currentYear = new Date().getFullYear() + this.seasonHistory.length;
-            
-            squadHTML = `
-            <div style="max-height: 400px; overflow-y: auto;">
-                <table class="standings-table" style="width: 100%; margin-top: 10px;">
-                    <thead>
-                        <tr>
-                            <th>Nome</th>
-                            <th>Pos</th>
-                            <th>Idade</th>
-                            <th>OVR</th>
-                            <th>POT</th>
-                            <th>Valor</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-            `;
-            
-            teamPlayers.forEach(player => {
-                const age = currentYear - player.dob;
-                const roleInfo = this.roleMap[player.role] || { name: '?' };
-                const value = this.calcPlayerValue(player);
-                
-                squadHTML += `
-                <tr style="cursor: pointer;" onclick="App.showPlayerProfile('${player.id}')">
-                    <td>${player.name}</td>
-                    <td>${roleInfo.name}</td>
-                    <td>${age}</td>
-                    <td>${player.rating.toFixed(0)}</td>
-                    <td>${player.ratingPotential.toFixed(0)}</td>
-                    <td>${this.formatValue(value)}</td>
-                </tr>
-                `;
-            });
+        teamPlayers.forEach(player => {
+            const age = currentYear - player.dob;
+            const roleInfo = this.roleMap[player.role] || { name: '?' };
+            const value = this.calcPlayerValue(player);
+            const flag = flagMap.get(player.countryId) || '';
             
             squadHTML += `
-                    </tbody>
-                </table>
-            </div>
+            <tr style="cursor: pointer;" onclick="App.showPlayerProfile('${player.id}')">
+                <td>${roleInfo.name}</td>
+                <td style="white-space: nowrap; text-align: left;">
+                    ${flag ? `<img src="${flag}" alt="" class="flag-icon" style="margin-right: 5px; vertical-align: middle">` : ''}
+                    ${player.name}
+                </td>
+                <td>${age}</td>
+                <td>${player.rating.toFixed(0)}</td>
+                <td>${player.ratingPotential.toFixed(0)}</td>
+                <td>${this.formatValue(value)}</td>
+            </tr>
             `;
-        } else {
-            squadHTML = `<div style="text-align: center; padding: 20px; color: #666;">Nenhum jogador no elenco</div>`;
-        }
-        
-        this.loadLogo(teamId).then(logo => {
-            document.getElementById('profileContent').innerHTML = `
-            <div class="profile-buttons" style="display: flex; gap: 10px; margin-bottom: 20px;">
-                <button id="backToProfileBtn" class="btn btn-secondary">Voltar ao Perfil</button>
-            </div>
-            <div style="text-align: center;">
-                ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${team.name}" class="logo"></div>` : ''} 
-                ${team.name}
-            </div>
-            <h4 style="text-align: center;">Elenco (${this.players.filter(p => p.clubId === teamId && !p.retired).length} jogadores)</h4>
-            ${squadHTML}
-            `;
-            document.getElementById('backToProfileBtn').addEventListener('click', () => this.showTeamProfile(teamId));
         });
-    },
+        
+        squadHTML += `
+                </tbody>
+            </table>
+        </div>
+        `;
+    } else {
+        squadHTML = `<div style="text-align: center; padding: 20px; color: #666;">Nenhum jogador no elenco</div>`;
+    }
+    
+    const logo = await this.loadLogo(teamId);
+    document.getElementById('profileContent').innerHTML = `
+    <div class="profile-buttons" style="display: flex; gap: 10px; margin-bottom: 20px;">
+        <button id="backToProfileBtn" class="btn btn-secondary">Voltar ao Perfil</button>
+    </div>
+    <div style="text-align: center;">
+        ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${team.name}" class="logo"></div>` : ''} 
+        ${team.name}
+    </div>
+    <h4 style="text-align: center;">Elenco (${this.players.filter(p => p.clubId === teamId && !p.retired).length} jogadores)</h4>
+    ${squadHTML}
+    `;
+    document.getElementById('backToProfileBtn').addEventListener('click', () => this.showTeamProfile(teamId));
+},
     
     // Nova função: Mostrar perfil do jogador
     showPlayerProfile(playerId) {
@@ -4504,17 +4690,22 @@ getRelevantTransitions() {
         const totalGoals = playerStatsData.reduce((sum, s) => sum + s.goals, 0);
         const totalGames = playerStatsData.reduce((sum, s) => sum + s.games, 0);
         
-        this.loadLogo(player.clubId).then(logo => {
+        Promise.all([this.loadLogo(player.clubId), this.loadFlag(player.countryId)]).then(([logo, flag]) => {
             document.getElementById('profileContent').innerHTML = `
             <div class="profile-buttons" style="display: flex; gap: 10px; margin-bottom: 20px;">
                 <button id="backToSquadBtn" class="btn btn-secondary">Voltar ao Elenco</button>
             </div>
-            <div style="text-align: center;">
-                ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${club?.name}" class="logo"></div>` : ''} 
-                <h3>${player.name}</h3>
-            </div>
+<div style="text-align: center;">
+    ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${club?.name}" class="logo"></div>` : ''} 
+    <h3>
+        ${flag ? `<img src="${flag}" alt="" class="flag-icon">` : ''}${player.name}
+    </h3>
+</div>
             <p><i class="fas fa-running"></i> <strong>Posição:</strong> ${roleInfo.name}</p>
-            <p><i class="fas fa-flag"></i> <strong>Nacionalidade:</strong> ${country}</p>
+<p>
+    <i class="fas fa-flag"></i> <strong>Nacionalidade:</strong> 
+    ${flag ? `<img src="${flag}" alt="" class="flag-icon">` : ''}${country}
+</p>
             <p><i class="fas fa-birthday-cake"></i> <strong>Idade:</strong> ${age} anos (${player.dob})</p>
             <p><i class="fas fa-star"></i> <strong>Overall:</strong> ${player.rating.toFixed(0)}</p>
             <p><i class="fas fa-chart-line"></i> <strong>Potencial:</strong> ${player.ratingPotential.toFixed(0)}</p>

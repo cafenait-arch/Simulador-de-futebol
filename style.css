@@ -4,14 +4,14 @@
     padding: 0;
     box-sizing: border-box;
     border: none;
-    font-family: 'arimo', sans-serif;
+    font-family: 'archivo', sans-serif;
 }
 
 /* Base */
 body {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: #222;
-    font-size: 11.5px;
+    font-size: 12.5px;
     min-height: 100vh;
     padding: 8px;
 }
@@ -295,6 +295,7 @@ button i {
     width: 100%;
     min-width: 400px;
     border-collapse: collapse;
+    table-layout: auto;
 }
 
 .standings-table th {
@@ -309,8 +310,19 @@ button i {
     z-index: 10;
 }
 
+/* Coluna de nomes (segunda coluna) com largura mínima maior */
+.standings-table th:nth-child(2),
+.standings-table td:nth-child(2) {
+    min-width: 160px;
+    max-width: 220px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: bold;
+}
+
 .standings-table td {
-    padding: 0.5px;
+    padding: 0px 4px;
 }
 
 .standings-table tr:nth-child(even) {
@@ -326,14 +338,34 @@ button i {
 }
 
 .standings-table th:nth-child(n+3),
-.standings-table td:nth-child(n+3),
-.standings-table td:first-child {
+.standings-table td:nth-child(n+3) {
     text-align: center;
+}
+
+.standings-table th:first-child,
+.standings-table td:first-child {
+    text-align: left;
 }
 
 .standings-table td:nth-child(2) span {
     font-weight: 600;
     vertical-align: middle;
+}
+
+/* Flag image styling */
+.flag-icon {
+    width: 16px;
+    height: 16px;
+    vertical-align: middle;
+    margin-right: 4px;
+}
+
+.flag-icon-small {
+    width: 12px;
+    height: 12px;
+    vertical-align: middle;
+    margin-right: 4px;
+    opacity: 0.8;
 }
 
 /* Status Colors */
@@ -405,8 +437,8 @@ button i {
 }
 
 .logo {
-    width: 14px;
-    height: 14px;
+    width: 15px;
+    height: 15px;
     display: inline-block;
     vertical-align: middle;
 }

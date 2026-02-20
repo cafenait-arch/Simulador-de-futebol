@@ -1,15 +1,47 @@
 const App = {
-    clubs: [], countries: [], competitions: [], competitionStages: [], competitionStageClubs: [],
+    clubs: [], countries: [], continents: [], competitions: [], competitionStages: [], competitionStageClubs: [],
     competitionStageTransitions: [], competitionStageAwards: [], zipData: null, logoCache: new Map(), flagCache: new Map(), teamTitles: new Map(),
-    players: [], playerFicticiousNames: [], playerStats: [], // Novas tabelas
+    players: [], playerFicticiousNames: [], playerStats: [], playerYouthReveal: [],
     seasonHistory: [], currentSeason: 0, currentCompetition: null, currentStage: null,
     standings: [], schedule: [], playoffBracket: [], 
     currentGroups: [], currentGroupIndex: 0, currentDivisions: [], currentDivisionIndex: 0,
-    clubFormations: new Map(), // Armazena a formação fixa de cada time
-    rejectedOffers: [], // Array para armazenar ofertas rejeitadas da temporada atual
-    standingsMap: null, // Cache para standings
-    clubsMap: null, // Cache para clubes
-    nextSeasonInjections: new Map(), // Type 100: stageId → [club objects] para injetar na próxima temporada (funciona como type 106 entre temporadas)
+    clubFormations: new Map(),
+    rejectedOffers: [],
+    standingsMap: null,
+    clubsMap: null,
+    playersMap: null, // PERF: O(1) player lookup by id
+    countriesMap: null,
+    countriesByContinent: null,
+    nextSeasonInjections: new Map(),
+    // PERF: Pre-processed map: stageId → Set of competitionIds (avoids repeated split/map/includes)
+    stageCompetitionIdsMap: null,
+    // PERF: Pre-processed map: competitionId → [stage objects]
+    competitionStagesMap: null,
+    // PERF: Poisson lookup table to avoid repeated Math.exp calls
+    _poissonExpCache: new Map(),
+    
+YOUTH_LAMBDA_TABLE: {
+    1: { rating: 34, potential: 3 },
+    2: { rating: 36, potential: 3 },
+    3: { rating: 38, potential: 3 },
+    4: { rating: 40, potential: 4 },
+    5: { rating: 42, potential: 5 },
+    6: { rating: 44, potential: 6 },
+    7: { rating: 46, potential: 7 },
+    8: { rating: 48, potential: 8 },
+    9: { rating: 50, potential: 9 },
+    10: { rating: 52, potential: 10 },
+    11: { rating: 54, potential: 11 },
+    12: { rating: 56, potential: 12 },
+    13: { rating: 58, potential: 13 },
+    14: { rating: 60, potential: 14 },
+    15: { rating: 62, potential: 15 },
+    16: { rating: 64, potential: 16 },
+    17: { rating: 66, potential: 17 },
+    18: { rating: 68, potential: 16 },
+    19: { rating: 70, potential: 17 },
+    20: { rating: 72, potential: 18 }
+},
     
 formations: {
     '4-3-3': { positions: [1, 3, 4, 4, 2, 5, 8, 8, 6, 7, 9] },
@@ -43,9 +75,19 @@ formations: {
         
         const getTable = tableName => this.db.exec(`SELECT * FROM ${tableName}`)[0]?.values || [];
         
-        this.countries = getTable("Country").map(([id, name]) => ({ 
+        // Carregar Continentes
+        try {
+            this.continents = getTable("Continent").map(([id, name]) => ({
+                id: id != null ? id.toString() : null,
+                name
+            })).filter(c => c.id != null);
+        } catch(e) { this.continents = []; }
+        
+        this.countries = getTable("Country").map(([id, name, continentId, namesCountryId]) => ({ 
             id: id != null ? id.toString() : null, 
-            name 
+            name,
+            continentId: continentId != null ? continentId.toString() : null,
+            namesCountryId: namesCountryId != null ? namesCountryId.toString() : null
         })).filter(c => c.id != null);
         
 this.competitions = getTable("Competition").map(([id, countryId, name, type, importanceOrder]) => ({
@@ -100,16 +142,25 @@ try {
 
 // Carregar PlayerFicticiousName
 try {
-    this.playerFicticiousNames = getTable("PlayerFicticiousName").map(([countryId, name, firstName, weight]) => ({
-        countryId: countryId != null ? countryId.toString() : null,
+    this.playerFicticiousNames = getTable("PlayerFicticiousName").map(([name, firstName, weight, namesCountryId]) => ({
         name,
         firstName: +firstName, // 0 = nome, 1 = sobrenome
-        weight: +weight
-    })).filter(n => n.countryId != null);
+        weight: +weight,
+        namesCountryId: namesCountryId != null ? namesCountryId.toString() : null
+    })).filter(n => n.namesCountryId != null);
 } catch(e) { this.playerFicticiousNames = []; }
 
 // Inicializar estatísticas de jogadores
 this.playerStats = [];
+
+// Carregar PlayerYouthReveal
+try {
+    this.playerYouthReveal = getTable("PlayerYouthReveal").map(([countryId, countryPlayerId, probability]) => ({
+        countryId: countryId != null ? countryId.toString() : null,
+        countryPlayerId: countryPlayerId != null ? countryPlayerId.toString() : null,
+        probability: +probability
+    })).filter(r => r.countryId != null && r.countryPlayerId != null);
+} catch(e) { this.playerYouthReveal = []; }
 
 this.competitionStages = getTable("CompetitionStage").map(([id, competitionId, name, startingWeek, stageType, numLegs, numRounds,numGroups,isWinnerDecisionStage]) => ({
     id: id != null ? id.toString() : null, 
@@ -159,9 +210,13 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
             
             club.originalCompetitions = [...club.competitions];
             club.originalStages = [...club.stages];
+            // Salvar estado do DB para reset completo entre simulações
+            club.dbOriginalCompetitions = [...club.competitions];
+            club.dbOriginalStages = [...club.stages];
         });
 
         this.initializeTitles();
+        this.buildCountriesMaps();
     },
 
     initializeTitles() {
@@ -202,10 +257,32 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
             { id: "groupNext", event: "click", fn: () => this.changeGroup(1) },
             { id: "divisionUp", event: "click", fn: () => this.changeDivision(-1) },
             { id: "divisionDown", event: "click", fn: () => this.changeDivision(1) },
-            { id: "viewPlayoffBtn", event: "click", fn: () => this.togglePlayoffView() },
-            { id: "viewTransfersBtn", event: "click", fn: () => this.toggleTransfersView() }
-        ].forEach(({ id, event, fn }) => document.getElementById(id)?.addEventListener(event, fn));
+    { id: "viewPlayoffBtn", event: "click", fn: () => this.togglePlayoffView() },
+    
+    { id: "saveGameBtn", event: "click", fn: () => this.saveGame() },
+    
+    {
+        id: "loadGameBtn",
+        event: "click",
+        fn: () => document.getElementById("loadGameFile").click()
     },
+    
+    {
+        id: "loadGameFile",
+        event: "change",
+        fn: (e) => {
+            if (e.target.files.length > 0) {
+                this.loadGame(e.target.files[0]);
+                e.target.value = '';
+            }
+        }
+    },
+    
+    { id: "viewTransfersBtn", event: "click", fn: () => this.toggleTransfersView() }
+    
+].forEach(({ id, event, fn }) =>
+    document.getElementById(id)?.addEventListener(event, fn)
+)},
 
     setupTabs() {
         document.querySelectorAll(".nav-item").forEach(tab => {
@@ -273,15 +350,12 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
                 teams = this.getAllTeamsFromStage(stage, stageResult.standings, stageResult.groups, stageResult.playoffBracket)
                     .map(t => this.getClub(t.id)).filter(Boolean);
             } else {
-                // SEMPRE combina: times do CompetitionStageClub + qualificados de transições + injetados (type 106)
-                let assignedTeams = this.clubs.filter(club => club.stages.includes(stage.id));
-                
-                // Para competições type 2, playoff stages (stageType 1) devem receber times
-                // APENAS via transições da temporada atual, não de club.stages persistidos
-                // de temporadas anteriores. Só mantém times originalmente atribuídos no DB.
-                if (competition.type === 2 && stage.stageType === 1) {
-                    assignedTeams = assignedTeams.filter(club => club.originalStages.includes(stage.id));
-                }
+                // Times vêm de: CompetitionStageClub (originalStages) + qualificados de transições + injetados (type 106/100)
+                // APENAS times originalmente atribuídos no DB são considerados de club.stages
+                // Isso evita "fantasmas" de temporadas anteriores que ficaram em club.stages via transições
+                let assignedTeams = this.clubs.filter(club => 
+                    club.stages.includes(stage.id) && club.originalStages.includes(stage.id)
+                );
                 
                 const qualifiedFromTransitions = qualifiedTeams.get(stage.id) || [];
                 const extraTeams = crossQualified.get(stage.id) || [];
@@ -294,9 +368,32 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
                 teams = Array.from(unique.values());
                 
                 if (extraTeams.length) { 
-                    try { 
-                        console.log("[Stage", stage.id, competition.name, "] injected via 106:", extraTeams.map(t=>t.name), "| Total teams:", teams.length); 
-                    } catch(_){} 
+                }
+                
+                // Fix Supercopa: se o mesmo time venceu campeonato e copa, 
+                // substituir o duplicado pelo vice-campeão do campeonato
+                if (competition.type === 4 && teams.length < 2 && teams.length > 0) {
+                    const sameCountryChampionship = this.competitions.find(c => 
+                        c.type === 2 && c.countryId === competition.countryId
+                    );
+                    if (sameCountryChampionship) {
+                        const champStages = this.competitionStages.filter(s => {
+                            const compIds = s.competitionId.split(',').map(id => id.trim());
+                            return compIds.includes(sameCountryChampionship.id);
+                        }).sort((a, b) => b.startingWeek - a.startingWeek);
+                        
+                        const lastChampStage = champStages.find(s => s.isWinnerDecisionStage) || champStages[0];
+                        if (lastChampStage && sharedStageResults.has(lastChampStage.id)) {
+                            const champResult = sharedStageResults.get(lastChampStage.id);
+                            const secondPlace = champResult.standings?.[1];
+                            if (secondPlace) {
+                                const secondPlaceClub = this.getClub(secondPlace.id);
+                                if (secondPlaceClub && !teams.find(t => t.id === secondPlaceClub.id)) {
+                                    teams.push(secondPlaceClub);
+                                }
+                            }
+                        }
+                    }
                 }
                 
                 if (teams.length === 0) {
@@ -308,27 +405,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
                 competitionResult.stages.push(stageResult);
             }
             
-            // SEMPRE processa avanço de playoffs e transições (mesmo para stages cacheados)
-            
-            // Se foi um playoff, avança vencedores automaticamente para o próximo playoff stage
-            // (funciona como fallback caso não haja transições explícitas definidas)
-            if (stage.stageType === 1 && stageResult.playoffData?.winners?.length > 0) {
-                const nextPlayoffStage = this.findNextPlayoffStage(stage, competition);
-                if (nextPlayoffStage) {
-                    if (!qualifiedTeams.has(nextPlayoffStage.id)) {
-                        qualifiedTeams.set(nextPlayoffStage.id, []);
-                    }
-                    const currentTeams = qualifiedTeams.get(nextPlayoffStage.id);
-                    stageResult.playoffData.winners.forEach(winner => {
-                        const team = this.getClub(winner.id);
-                        if (team && !currentTeams.find(t => t.id === team.id)) {
-                            currentTeams.push(team);
-                        }
-                    });
-                }
-            }
-            
-            // Processar transições explícitas (CompetitionStageTransition)
+            // SEMPRE processa transições (CompetitionStageTransition) - ÚNICA fonte de verdade
             const transitions = this.competitionStageTransitions.filter(t => t.stageIdFrom === stage.id);
             
             for (const transition of transitions) {
@@ -386,7 +463,7 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
 
 
                         const winner = finalRound.matches[0].winner;
-                        if (winner && !winner.isBye) {
+                        if (winner) {
                             competitionResult.championId = winner.id;
                         }
                     }
@@ -426,48 +503,52 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
         // Criar Map para acesso O(1) ao invés de find O(n)
         const clubsStatsMap = new Map(stageResult.clubsStats.map(s => [s.id, s]));
         
-        if (stage.stageType === 1) {
-            const playoffData = this.simulatePlayoff(teams, stage);
-            stageResult.playoffBracket = playoffData.bracket;
-            stageResult.playoffData = playoffData;
-            stageResult.standings = this.getPlayoffTeamsInOrder(playoffData.bracket, playoffData.winners);
+// Dentro de simulateStage, após criar o stageResult
+
+if (stage.stageType === 1) {
+    // Playoff - já tem registro dentro de simulatePlayoff
+    const playoffData = this.simulatePlayoff(teams, stage);
+    stageResult.playoffBracket = playoffData.bracket;
+    stageResult.playoffData = playoffData;
+    stageResult.standings = this.getPlayoffTeamsInOrder(playoffData.bracket, playoffData.winners);
+}
+else if (stage.stageType === 2) {
+    // Liga com potes
+    stageResult.schedule = this.generatePotLeagueSchedule(teams);
+    this.initializeStandings(teams);
+    
+    for (const roundMatches of stageResult.schedule) {
+        for (const match of roundMatches) {
+            // O playMatch já registra jogos e gols internamente
+            this.playMatch(match, stageResult.clubsStats, clubsStatsMap);
         }
-        else if (stage.stageType === 2) {
-            // Liga com potes: 4 potes de 9 times, cada time enfrenta 8 adversários do próprio pote
-            stageResult.schedule = this.generatePotLeagueSchedule(teams);
-            this.initializeStandings(teams);
-            
-            for (const roundMatches of stageResult.schedule) {
-                for (const match of roundMatches) {
-                    this.playMatch(match, stageResult.clubsStats, clubsStatsMap);
-                }
-            }
-            
-            this.sortStandings();
-            stageResult.standings = JSON.parse(JSON.stringify(this.standings));
+    }
+    
+    this.sortStandings();
+    stageResult.standings = JSON.parse(JSON.stringify(this.standings));
+}
+else if (stage.stageType === 3) {
+    // Grupos onde times jogam contra todos os times dos OUTROS grupos
+    stageResult.groups = this.simulateCrossGroupStage(teams, stage, stageResult.clubsStats, clubsStatsMap);
+    stageResult.standings = this.consolidateGroupStandings(stageResult.groups);
+}
+else if (stage.numGroups > 1) {
+    stageResult.groups = this.simulateGroupStage(teams, stage, stageResult.clubsStats, clubsStatsMap);
+    stageResult.standings = this.consolidateGroupStandings(stageResult.groups);
+}
+else {
+    stageResult.schedule = this.generateLeagueSchedule(teams, stage.numRounds || 2);
+    this.initializeStandings(teams);
+    
+    for (const roundMatches of stageResult.schedule) {
+        for (const match of roundMatches) {
+            this.playMatch(match, stageResult.clubsStats, clubsStatsMap);
         }
-        else if (stage.stageType === 3) {
-            // Grupos onde times jogam contra todos os times dos OUTROS grupos
-            stageResult.groups = this.simulateCrossGroupStage(teams, stage);
-            stageResult.standings = this.consolidateGroupStandings(stageResult.groups);
-        }
-        else if (stage.numGroups > 1) {
-            stageResult.groups = this.simulateGroupStage(teams, stage);
-            stageResult.standings = this.consolidateGroupStandings(stageResult.groups);
-        }
-        else {
-            stageResult.schedule = this.generateLeagueSchedule(teams, stage.numRounds || 2);
-            this.initializeStandings(teams);
-            
-            for (const roundMatches of stageResult.schedule) {
-                for (const match of roundMatches) {
-                    this.playMatch(match, stageResult.clubsStats, clubsStatsMap);
-                }
-            }
-            
-            this.sortStandings();
-            stageResult.standings = JSON.parse(JSON.stringify(this.standings));
-        }
+    }
+    
+    this.sortStandings();
+    stageResult.standings = JSON.parse(JSON.stringify(this.standings));
+}
         
         this.updateRatingsFromStats(stageResult.clubsStats);
         return stageResult;
@@ -481,38 +562,26 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
         
         if (playoffBracket.length > 0 && playoffBracket[0].matches) {
             playoffBracket[0].matches.forEach(match => {
-                if (!match.isBye) {
-                    // Adiciona o vencedor
-                    standings.push({
-                        id: match.winner.id,
-                        name: match.winner.name,
-                        played: 1, won: 1, drawn: 0, lost: 0,
-                        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 3,
-                        playoffRound: 1,
-                        qualified: true
-                    });
-                    
-                    // Adiciona o perdedor
-                    const loser = match.winner.id === match.team1.id ? match.team2 : match.team1;
-                    standings.push({
-                        id: loser.id,
-                        name: loser.name,
-                        played: 1, won: 0, drawn: 0, lost: 1,
-                        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
-                        playoffRound: 1,
-                        qualified: false
-                    });
-                } else {
-                    // Bye - time avança automaticamente
-                    standings.push({
-                        id: match.winner.id,
-                        name: match.winner.name,
-                        played: 0, won: 0, drawn: 0, lost: 0,
-                        goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
-                        playoffRound: 1,
-                        qualified: true
-                    });
-                }
+                // Adiciona o vencedor
+                standings.push({
+                    id: match.winner.id,
+                    name: match.winner.name,
+                    played: 1, won: 1, drawn: 0, lost: 0,
+                    goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 3,
+                    playoffRound: 1,
+                    qualified: true
+                });
+                
+                // Adiciona o perdedor
+                const loser = match.winner.id === match.team1.id ? match.team2 : match.team1;
+                standings.push({
+                    id: loser.id,
+                    name: loser.name,
+                    played: 1, won: 0, drawn: 0, lost: 1,
+                    goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0,
+                    playoffRound: 1,
+                    qualified: false
+                });
             });
         }
         
@@ -553,24 +622,32 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
         const teams = new Map();
         playoffBracket.forEach(round => {
             round.matches.forEach(match => {
-                if (!match.team1.isBye) teams.set(match.team1.id, match.team1);
-                if (!match.team2.isBye) teams.set(match.team2.id, match.team2);
+                if (match.team1.id) teams.set(match.team1.id, match.team1);
+                if (match.team2.id) teams.set(match.team2.id, match.team2);
             });
         });
         return Array.from(teams.values());
     },
 
-    simulateGroupStage(teams, stage) {
+    simulateGroupStage(teams, stage, clubsStats = [], clubsStatsMap = null) {
         const groups = [];
         const numGroups = stage.numGroups || 1;
-        const teamsPerGroup = Math.floor(teams.length / numGroups);
         const numRounds = stage.numRounds || 2;
         
         const shuffledTeams = [...teams].sort(() => Math.random() - 0.5);
         
+        // Distribuir times uniformemente, incluindo sobras nos primeiros grupos
+        const baseSize = Math.floor(shuffledTeams.length / numGroups);
+        const remainder = shuffledTeams.length % numGroups;
+        let startIndex = 0;
+        
         for (let g = 0; g < numGroups; g++) {
-            const groupTeams = shuffledTeams.slice(g * teamsPerGroup, (g + 1) * teamsPerGroup);
+            const groupSize = baseSize + (g < remainder ? 1 : 0);
+            const groupTeams = shuffledTeams.slice(startIndex, startIndex + groupSize);
+            startIndex += groupSize;
             const groupId = String.fromCharCode(65 + g);
+            
+            if (groupTeams.length < 2) continue;
             
             const group = {
                 id: groupId,
@@ -583,17 +660,7 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
             
             for (const roundMatches of group.schedule) {
                 for (const match of roundMatches) {
-                    const homeClub = this.getClub(match.home);
-                    const awayClub = this.getClub(match.away);
-                    if (!homeClub || !awayClub) continue;
-                    
-                    const homeExpected = this.calcExpectedGoals(homeClub.rating, awayClub.rating, true);
-                    const awayExpected = this.calcExpectedGoals(awayClub.rating, homeClub.rating, false);
-                    const homeScore = this.poisson(homeExpected);
-                    const awayScore = this.poisson(awayExpected);
-                    
-                    Object.assign(match, { homeScore, awayScore, played: true });
-                    this.updateStandings(homeClub.id, awayClub.id, homeScore, awayScore, homeExpected, awayExpected);
+                    this.playMatch(match, clubsStats, clubsStatsMap);
                 }
             }
             
@@ -605,129 +672,105 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
         return groups;
     },
 
-    simulateCrossGroupStage(teams, stage) {
-        // stageType 3: Times jogam contra todos os times dos OUTROS grupos
-        const groups = [];
-        const numGroups = stage.numGroups || 2;
-        const teamsPerGroup = Math.floor(teams.length / numGroups);
-        const numRounds = stage.numRounds || 1;
-        
-        const shuffledTeams = [...teams].sort(() => Math.random() - 0.5);
-        
-        // Primeiro, distribui os times em grupos
-        const groupTeamsMap = [];
-        for (let g = 0; g < numGroups; g++) {
-            const groupTeams = shuffledTeams.slice(g * teamsPerGroup, (g + 1) * teamsPerGroup);
-            groupTeamsMap.push({
-                id: String.fromCharCode(65 + g),
-                teams: groupTeams
-            });
-        }
-        
-        // Para cada grupo, gera jogos contra times de OUTROS grupos
-        for (let g = 0; g < numGroups; g++) {
-            const groupTeams = groupTeamsMap[g].teams;
-            const groupId = groupTeamsMap[g].id;
+simulateCrossGroupStage(teams, stage, clubsStats = [], clubsStatsMap = null) {
+    const numGroups = stage.numGroups ?? 2;
+    
+    /* ========= SHUFFLE ========= */
+    const shuffled = [...teams];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    
+    /* ========= GRUPOS ========= */
+    const groups = Array.from({ length: numGroups }, (_, i) => ({
+        id: String.fromCharCode(65 + i),
+        teams: []
+    }));
+    
+    shuffled.forEach((t, i) => groups[i % numGroups].teams.push(t));
+    
+    const teamGroup = new Map();
+    groups.forEach(g =>
+        g.teams.forEach(t => teamGroup.set(t.id, g.id))
+    );
+    
+    /* ========= SCHEDULE ========= */
+    const schedule = [];
+    let globalRound = 1;
+    
+    for (let g1 = 0; g1 < groups.length; g1++) {
+        for (let g2 = g1 + 1; g2 < groups.length; g2++) {
             
-            // Coleta todos os times dos outros grupos
-            const opponentTeams = [];
-            for (let og = 0; og < numGroups; og++) {
-                if (og !== g) {
-                    opponentTeams.push(...groupTeamsMap[og].teams);
-                }
-            }
+            let A = groups[g1].teams.map(t => t.id);
+            let B = groups[g2].teams.map(t => t.id);
             
-            const group = {
-                id: groupId,
-                teams: groupTeams,
-                standings: [],
-                schedule: this.generateCrossGroupSchedule(groupTeams, opponentTeams, numRounds),
-                isCrossGroup: true
-            };
+            // Completa com BYE
+            const maxLen = Math.max(A.length, B.length);
+            while (A.length < maxLen) A.push(null);
+            while (B.length < maxLen) B.push(null);
             
-            this.initializeStandings(groupTeams);
+            let rotA = [...A];
+            let rotB = [...B];
             
-            for (const roundMatches of group.schedule) {
-                for (const match of roundMatches) {
-                    const homeClub = this.getClub(match.home);
-                    const awayClub = this.getClub(match.away);
-                    if (!homeClub || !awayClub) continue;
+            for (let r = 0; r < maxLen; r++) {
+                const roundMatches = [];
+                const invertHome = r % 2 === 1;
+                
+                for (let i = 0; i < maxLen; i++) {
+                    const a = rotA[i];
+                    const b = rotB[i];
+                    if (!a || !b) continue;
                     
-                    const homeExpected = this.calcExpectedGoals(homeClub.rating, awayClub.rating, true);
-                    const awayExpected = this.calcExpectedGoals(awayClub.rating, homeClub.rating, false);
-                    const homeScore = this.poisson(homeExpected);
-                    const awayScore = this.poisson(awayExpected);
+                    const home = invertHome ? b : a;
+                    const away = invertHome ? a : b;
                     
-                    Object.assign(match, { homeScore, awayScore, played: true });
-                    this.updateStandings(homeClub.id, awayClub.id, homeScore, awayScore, homeExpected, awayExpected);
-                }
-            }
-            
-            this.sortStandings();
-            group.standings = JSON.parse(JSON.stringify(this.standings));
-            groups.push(group);
-        }
-        
-        return groups;
-    },
-
-    generateCrossGroupSchedule(groupTeams, opponentTeams, numRounds) {
-        // Cada time do grupo joga contra todos os times adversários
-        const allMatches = [];
-        
-        for (const team of groupTeams) {
-            for (const opponent of opponentTeams) {
-                for (let r = 0; r < numRounds; r++) {
-                    // Alterna mando de campo nas rodadas
-                    const isHome = r % 2 === 0;
-                    allMatches.push({
-                        home: isHome ? team.id : opponent.id,
-                        away: isHome ? opponent.id : team.id,
+                    roundMatches.push({
+                        home,
+                        away,
                         homeScore: 0,
                         awayScore: 0,
                         played: false,
-                        round: 0,
-                        groupTeam: team.id, // Marca qual time é do grupo
-                        opponentGroup: this.findTeamGroup ? this.findTeamGroup(opponent.id) : null
+                        round: globalRound,
+                        homeGroup: teamGroup.get(home),
+                        awayGroup: teamGroup.get(away)
                     });
                 }
-            }
-        }
-        
-        // Distribui os jogos em rodadas
-        const schedule = [];
-        let round = 1;
-        const remainingMatches = [...allMatches];
-        
-        while (remainingMatches.length > 0) {
-            const roundMatches = [];
-            const teamsInRound = new Set();
-            
-            for (let i = remainingMatches.length - 1; i >= 0; i--) {
-                const match = remainingMatches[i];
-                if (!teamsInRound.has(match.home) && !teamsInRound.has(match.away)) {
-                    match.round = round;
-                    roundMatches.push(match);
-                    teamsInRound.add(match.home);
-                    teamsInRound.add(match.away);
-                    remainingMatches.splice(i, 1);
-                }
-            }
-            
-            if (roundMatches.length > 0) {
+                
                 schedule.push(roundMatches);
-                round++;
-            } else {
-                // Evita loop infinito
-                if (remainingMatches.length > 0) {
-                    schedule.push(remainingMatches.splice(0));
-                }
-                break;
+                globalRound++;
+                
+                // Rotação tipo círculo
+                rotA = [rotA[0], ...rotA.slice(2), rotA[1]];
+                rotB = [rotB[rotB.length - 1], ...rotB.slice(0, rotB.length - 1)];
             }
         }
-        
-        return schedule;
-    },
+    }
+    
+    /* ========= SIMULA ========= */
+    this.initializeStandings(teams);
+    schedule.forEach(r =>
+        r.forEach(m => this.playMatch(m, clubsStats, clubsStatsMap))
+    );
+    this.sortStandings();
+    
+    const finalStandings = structuredClone(this.standings);
+    
+    /* ========= RETORNO ========= */
+    return groups.map(g => ({
+        id: g.id,
+        teams: g.teams,
+        standings: finalStandings.filter(s =>
+            g.teams.some(t => t.id === s.id)
+        ),
+        schedule: schedule.map(r =>
+            r.filter(m =>
+                g.teams.some(t => t.id === m.home || t.id === m.away)
+            )
+        ),
+        isCrossGroup: true
+    }));
+},
 
     simulatePlayoff(teams, stage) {
         const numLegs = stage.numLegs || 1;
@@ -748,12 +791,12 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
         // Emparelha times de forma aleatória
         const shuffledTeams = [...allTeams].sort(() => Math.random() - 0.5);
         
+        // Se número ímpar, descarta o último (sem BYE)
+        if (shuffledTeams.length % 2 !== 0) {
+            shuffledTeams.pop();
+        }
+        
         for (let i = 0; i < shuffledTeams.length; i += 2) {
-            if (i + 1 >= shuffledTeams.length) {
-                // Time ímpar avança automaticamente (bye)
-                winners.push(shuffledTeams[i]);
-                continue;
-            }
             
             const team1 = shuffledTeams[i];
             const team2 = shuffledTeams[i + 1];
@@ -892,8 +935,8 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
                 const allTeams = new Map();
                 playoffBracket.forEach(round => {
                     round.matches.forEach(match => {
-                        if (!match.team1.isBye) allTeams.set(match.team1.id, match.team1);
-                        if (!match.team2.isBye) allTeams.set(match.team2.id, match.team2);
+                        if (match.team1.id) allTeams.set(match.team1.id, match.team1);
+                        if (match.team2.id) allTeams.set(match.team2.id, match.team2);
                     });
                 });
                 return Array.from(allTeams.values());
@@ -908,7 +951,7 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
                 // Retorna todos os vencedores desta fase
                 playoffBracket.forEach(round => {
                     round.matches.forEach(match => {
-                        if (match.winner && !match.winner.isBye && !qualified.find(q => q.id === match.winner.id)) {
+                        if (match.winner && !qualified.find(q => q.id === match.winner.id)) {
                             qualified.push(match.winner);
                         }
                     });
@@ -918,9 +961,9 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
                 // Retorna todos os perdedores desta fase
                 playoffBracket.forEach(round => {
                     round.matches.forEach(match => {
-                        if (!match.isBye && match.winner) {
+                        if (match.winner) {
                             const loser = match.winner.id === match.team1.id ? match.team2 : match.team1;
-                            if (loser && !loser.isBye && !qualified.find(q => q.id === loser.id)) {
+                            if (loser && loser.id && !qualified.find(q => q.id === loser.id)) {
                                 qualified.push(loser);
                             }
                         }
@@ -952,8 +995,8 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
             const allTeams = new Map();
             playoffBracket.forEach(round => {
                 round.matches.forEach(match => {
-                    if (!match.team1.isBye) allTeams.set(match.team1.id, match.team1);
-                    if (!match.team2.isBye) allTeams.set(match.team2.id, match.team2);
+                    if (match.team1.id) allTeams.set(match.team1.id, match.team1);
+                    if (match.team2.id) allTeams.set(match.team2.id, match.team2);
                 });
             });
             return Array.from(allTeams.values());
@@ -1055,184 +1098,167 @@ if (finalRound && finalRound.matches && finalRound.matches.length > 0) {
         }
     },
 
-    generatePotLeagueSchedule(teams) {
-        // Liga com 36 equipes divididas em 4 potes de 9 times cada
-        // Cada time enfrenta 2 adversários de cada um dos outros 3 potes (8 jogos total)
-        
-        const numPots = 4;
-        const teamsPerPot = 9;
-        const opponentsPerPot = 2;
-        
-        // Ordena times por rating e divide em potes
-        const sortedTeams = [...teams].sort((a, b) => b.rating - a.rating);
-        const pots = [];
-        
-        for (let p = 0; p < numPots; p++) {
-            const potTeams = sortedTeams.slice(p * teamsPerPot, (p + 1) * teamsPerPot);
-            pots.push(potTeams.map(t => t.id));
-        }
-        
-        const allMatches = [];
-        const teamFixtures = new Map();
-        
-        // Inicializa fixtures para cada time
-        teams.forEach(team => {
-            teamFixtures.set(team.id, {
-                opponents: [],
-                homeGames: 0,
-                awayGames: 0,
-                potOpponents: [0, 0, 0, 0] // quantos adversários de cada pote
-            });
+generatePotLeagueSchedule(teams) {
+    const NUM_POTS = 4;
+    const TEAMS_PER_POT = 9;
+    const OPP_PER_POT = 2;
+    const TOTAL_HOME = 4;
+    
+    // === Ordena e cria potes ===
+    const sorted = [...teams].sort((a, b) => b.rating - a.rating);
+    const pots = Array.from({ length: NUM_POTS }, (_, i) =>
+        sorted.slice(i * TEAMS_PER_POT, (i + 1) * TEAMS_PER_POT).map(t => t.id)
+    );
+    
+    // === Estado dos times ===
+    const state = new Map();
+    teams.forEach(t => {
+        state.set(t.id, {
+            home: 0,
+            away: 0,
+            potCount: Array(NUM_POTS).fill(0)
         });
-        
-        // Para cada pote, sorteia adversários dos outros potes
-        for (let potIndex = 0; potIndex < numPots; potIndex++) {
-            const currentPot = pots[potIndex];
-            const otherPots = pots.filter((_, index) => index !== potIndex);
+    });
+    
+    const matches = [];
+    
+    // === Fisher-Yates ===
+    const shuffle = arr => {
+        for (let i = arr.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr;
+    };
+    
+    // === GERA CONFRONTOS POR POTE ===
+    for (let p1 = 0; p1 < NUM_POTS; p1++) {
+        for (let p2 = p1 + 1; p2 < NUM_POTS; p2++) {
             
-            for (const teamId of currentPot) {
-                const teamFixture = teamFixtures.get(teamId);
-                
-                // Sorteia 2 adversários de cada um dos outros 3 potes
-                for (let otherPotIndex = 0; otherPotIndex < otherPots.length; otherPotIndex++) {
-                    const targetPot = otherPots[otherPotIndex];
-                    const actualPotIndex = pots.indexOf(targetPot);
+            const a = shuffle([...pots[p1]]);
+            const b = shuffle([...pots[p2]]);
+            
+            // Cada time enfrenta 2 do outro pote
+            for (let i = 0; i < a.length; i++) {
+                for (let k = 0; k < OPP_PER_POT; k++) {
+                    const teamA = a[i];
+                    const teamB = b[(i * OPP_PER_POT + k) % b.length];
                     
-                    // Encontra adversários disponíveis neste pote
-                    const availableOpponents = targetPot.filter(oppId => {
-                        const oppFixture = teamFixtures.get(oppId);
-                        return !teamFixture.opponents.includes(oppId) && 
-                               oppFixture.potOpponents[potIndex] < opponentsPerPot;
-                    });
+                    const sA = state.get(teamA);
+                    const sB = state.get(teamB);
                     
-                    // Sorteia 2 adversários deste pote
-                    const shuffled = availableOpponents.sort(() => Math.random() - 0.5);
-                    const selectedOpponents = shuffled.slice(0, opponentsPerPot);
-                    
-                    for (const oppId of selectedOpponents) {
-                        if (!teamFixture.opponents.includes(oppId)) {
-                            // Adiciona adversário
-                            teamFixture.opponents.push(oppId);
-                            teamFixture.potOpponents[actualPotIndex]++;
-                            
-                            // Adiciona reciprocamente
-                            const oppFixture = teamFixtures.get(oppId);
-                            oppFixture.opponents.push(teamId);
-                            oppFixture.potOpponents[potIndex]++;
-                            
-                            // Decide mando de campo (4 casa, 4 fora para cada time)
-                            const teamHomeCount = teamFixture.homeGames;
-                            const teamAwayCount = teamFixture.awayGames;
-                            const oppHomeCount = oppFixture.homeGames;
-                            const oppAwayCount = oppFixture.awayGames;
-                            
-                            let isTeamHome;
-                            if (teamHomeCount < 4 && oppAwayCount < 4) {
-                                if (teamAwayCount >= 4 || oppHomeCount >= 4) {
-                                    isTeamHome = true;
-                                } else {
-                                    isTeamHome = Math.random() < 0.5;
-                                }
-                            } else {
-                                isTeamHome = false;
-                            }
-                            
-                            const match = {
-                                home: isTeamHome ? teamId : oppId,
-                                away: isTeamHome ? oppId : teamId,
-                                homeScore: 0,
-                                awayScore: 0,
-                                played: false,
-                                round: 0
-                            };
-                            
-                            allMatches.push(match);
-                            
-                            // Atualiza contadores de mando
-                            if (isTeamHome) {
-                                teamFixture.homeGames++;
-                                oppFixture.awayGames++;
-                            } else {
-                                teamFixture.awayGames++;
-                                oppFixture.homeGames++;
-                            }
-                        }
+                    if (sA.potCount[p2] >= OPP_PER_POT ||
+                        sB.potCount[p1] >= OPP_PER_POT) {
+                        continue;
                     }
-                }
-            }
-        }
-        
-        // Remove duplicatas (já que adicionamos jogos bidirecionalmente)
-        const uniqueMatches = [];
-        const processedPairs = new Set();
-        
-        for (const match of allMatches) {
-            const pairKey = [match.home, match.away].sort().join('-');
-            if (!processedPairs.has(pairKey)) {
-                processedPairs.add(pairKey);
-                uniqueMatches.push(match);
-            }
-        }
-        
-        // Distribui os jogos em rodadas
-        const schedule = [];
-        let round = 1;
-        const remainingMatches = [...uniqueMatches];
-        
-        while (remainingMatches.length > 0) {
-            const roundMatches = [];
-            const teamsInRound = new Set();
-            
-            for (let i = remainingMatches.length - 1; i >= 0; i--) {
-                const match = remainingMatches[i];
-                if (!teamsInRound.has(match.home) && !teamsInRound.has(match.away)) {
-                    match.round = round;
-                    roundMatches.push(match);
-                    teamsInRound.add(match.home);
-                    teamsInRound.add(match.away);
-                    remainingMatches.splice(i, 1);
-                }
-            }
-            
-            if (roundMatches.length > 0) {
-                schedule.push(roundMatches);
-                round++;
-            } else {
-                break;
-            }
-        }
-        
-        return schedule;
-    },
-
-    generateLeagueSchedule(teams, numRounds) {
-        const teamIds = teams.map(t => t.id);
-        if (teamIds.length % 2 !== 0) teamIds.push("BYE");
-        const numTeams = teamIds.length;
-        const schedule = [];
-        let rotation = [...teamIds];
-        const matchesPerRound = Math.floor(numTeams / 2);
-        const totalRounds = (numTeams - 1) * numRounds;
-
-        for (let r = 0; r < totalRounds; r++) {
-            const matches = [];
-            for (let i = 0; i < matchesPerRound; i++) {
-                const homeIndex = i, awayIndex = numTeams - 1 - i;
-                const isHome = r % 2 === 0;
-                const home = isHome ? rotation[homeIndex] : rotation[awayIndex];
-                const away = isHome ? rotation[awayIndex] : rotation[homeIndex];
-                if (home !== "BYE" && away !== "BYE") {
-                    matches.push({ 
-                        home, away, homeScore: 0, awayScore: 0, 
-                        played: false, round: r + 1 
+                    
+                    // Decide mando (balanceado)
+                    const home =
+                        sA.home < TOTAL_HOME &&
+                        (sB.away >= TOTAL_HOME || Math.random() < 0.5) ?
+                        teamA :
+                        teamB;
+                    
+                    const away = home === teamA ? teamB : teamA;
+                    
+                    state.get(home).home++;
+                    state.get(away).away++;
+                    sA.potCount[p2]++;
+                    sB.potCount[p1]++;
+                    
+                    matches.push({
+                        home,
+                        away,
+                        homeScore: 0,
+                        awayScore: 0,
+                        played: false,
+                        round: null
                     });
                 }
             }
-            schedule.push(matches);
-            rotation = [rotation[0], rotation[numTeams - 1], ...rotation.slice(1, numTeams - 1)];
         }
-        return schedule;
-    },
+    }
+    
+    // === AGENDAMENTO DE RODADAS ===
+    const schedule = [];
+    const remaining = [...matches];
+    let round = 1;
+    
+    while (remaining.length) {
+        const used = new Set();
+        const roundGames = [];
+        
+        for (let i = remaining.length - 1; i >= 0; i--) {
+            const m = remaining[i];
+            if (!used.has(m.home) && !used.has(m.away)) {
+                m.round = round;
+                roundGames.push(m);
+                used.add(m.home);
+                used.add(m.away);
+                remaining.splice(i, 1);
+            }
+        }
+        
+        schedule.push(roundGames);
+        round++;
+    }
+    
+    return schedule;
+},
+
+generateLeagueSchedule(teams, numRounds = 1) {
+    const ids = teams.map(t => t.id);
+    
+    if (ids.length % 2 !== 0) ids.push(null); // BYE
+    const n = ids.length;
+    const roundsPerTurn = n - 1;
+    const matchesPerRound = n / 2;
+    
+    let rotation = [...ids];
+    const schedule = [];
+    let roundNumber = 1;
+    
+    for (let turn = 0; turn < numRounds; turn++) {
+        for (let r = 0; r < roundsPerTurn; r++) {
+            const round = [];
+            
+            for (let i = 0; i < matchesPerRound; i++) {
+                const a = rotation[i];
+                const b = rotation[n - 1 - i];
+                if (!a || !b) continue;
+                
+                const isEven = (r + turn) % 2 === 0;
+                round.push({
+                    home: isEven ? a : b,
+                    away: isEven ? b : a,
+                    homeScore: 0,
+                    awayScore: 0,
+                    played: false,
+                    round: roundNumber
+                });
+            }
+            
+            schedule.push(round);
+            roundNumber++;
+            
+            // Rotação clássica do círculo
+            rotation = [
+                rotation[0],
+                ...rotation.slice(2),
+                rotation[1]
+            ];
+        }
+        
+        // Inverte mando no returno
+        schedule.slice(-roundsPerTurn).forEach(round =>
+            round.forEach(m => {
+                [m.home, m.away] = [m.away, m.home];
+            })
+        );
+    }
+    
+    return schedule;
+},
 
 // Removido sistema de atualização de rating dos times - agora baseado em jogadores
 updateRatingsFromStats(clubsStats) {
@@ -1289,11 +1315,23 @@ calculateTeamStats(clubId, lineup) {
 
 // Novo calcExpectedGoals baseado em ataque/meio e defesa/goleiro
 calcExpectedGoalsNew(teamStats, oppStats, isHome = false) {
-    const F = 4.5;
-    const atk = (teamStats.attack + teamStats.midfield) / 2 + (isHome ? F : 0);
-    const def = (oppStats.defense + oppStats.goalkeeper) / 2 + (isHome ? 0 : F);
+    const HOME_ATK = 1;
+    const HOME_DEF = 2;
+    
+const atk =
+    (teamStats.attack * 0.7 + teamStats.midfield * 0.3) +
+    (isHome ? HOME_ATK : 0);
+    
+    const def =
+        (oppStats.defense + oppStats.goalkeeper) / 2 +
+        (isHome ? HOME_DEF : 0);
+    
     const diff = atk - def;
-    return Math.max(1.2 + 0.05 * Math.sign(diff) * (Math.abs(diff) ** 1.2), 0.1);
+    
+    return Math.max(
+        1.1 + 0.05 * Math.sign(diff) * (Math.abs(diff) ** 1.2),
+        0.01
+    );
 },
 
 // Atribuir formação fixa a um time (se ainda não tem)
@@ -1410,7 +1448,7 @@ selectLineup(clubId) {
     
     if (clubPlayers.length < 11) {
         // Gerar jogadores fictícios se necessário
-        this.generateFicticiousPlayers(clubId, 20 - clubPlayers.length);
+        this.generateFicticiousPlayers(clubId, Math.max(0, 20 - clubPlayers.length));
         this.invalidatePlayerCache();
         clubPlayers = this.getClubPlayers(clubId);
     }
@@ -1485,122 +1523,148 @@ selectLineup(clubId) {
     
     return { lineup, formation: formationKey };
 },
-
-// Gerar jogadores fictícios com distribuição mínima e rating baseado no rating do time
-generateFicticiousPlayers(clubId, count) {
-    const club = this.getClub(clubId);
-    if (!club) return;
+generatePlayerName(countryId) {
+    // Buscar o namesCountryId do país para encontrar os nomes corretos
+    const country = this.countriesMap ? this.countriesMap.get(countryId) : this.countries.find(c => c.id === countryId);
+    const namesId = country?.namesCountryId || countryId;
     
-    const countryNames = this.playerFicticiousNames.filter(n => n.countryId === club.countryId);
+    const countryNames = this.playerFicticiousNames.filter(
+        n => n.namesCountryId === namesId
+    );
+    
+    const defaultFirstNames = ['João', 'Pedro', 'Lucas', 'Gabriel', 'Carlos', 'André', 'Rafael', 'Bruno', 'Thiago', 'Felipe',
+                              'Alex', 'Michael', 'Daniel', 'David', 'James', 'John', 'Thomas', 'Paul', 'Mark', 'Kevin',
+                              'Jean', 'Pierre', 'François', 'Nicolas', 'Antoine', 'Marco', 'Giuseppe', 'Francesco', 'Carlos',
+                              'Diego', 'Javier', 'Miguel', 'Alejandro', 'Hiroshi', 'Takumi', 'Kenji', 'Satoshi'];
+    
+    const defaultLastNames = ['Silva', 'Santos', 'Oliveira', 'Souza', 'Pereira', 'Costa', 'Ferreira', 'Rodrigues', 'Almeida', 'Lima',
+                             'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Martinez', 'Rodriguez', 'Wilson', 'Davis',
+                             'Martin', 'Bernard', 'Petit', 'Dubois', 'Moreau', 'Rossi', 'Russo', 'Ferrari', 'Esposito', 'Romano',
+                             'Gonzalez', 'Fernandez', 'Lopez', 'Perez', 'Sanchez', 'Tanaka', 'Suzuki', 'Yamamoto', 'Nakamura'];
+    
     const firstNames = countryNames.filter(n => n.firstName === 0);
     const lastNames = countryNames.filter(n => n.firstName === 1);
     
-    // Se não houver nomes, usar nomes genéricos
-    const defaultFirstNames = ['João', 'Pedro', 'Lucas', 'Gabriel', 'Carlos', 'André', 'Rafael', 'Bruno', 'Thiago', 'Felipe'];
-    const defaultLastNames = ['Silva', 'Santos', 'Oliveira', 'Souza', 'Pereira', 'Costa', 'Ferreira', 'Rodrigues', 'Almeida', 'Lima'];
+    let firstName, lastName;
     
-const minPositions = {
-    1: 2,
-    2: 3,
-    3: 3,
-    4: 4,
-    5: 3,
-    6: 3,
-    7: 3,
-    8: 4,
-    9: 4
-};
+    if (firstNames.length > 0) {
+        firstName = this.weightedRandomSelect(firstNames);
+    } else {
+        firstName = defaultFirstNames[Math.floor(Math.random() * defaultFirstNames.length)];
+    }
     
-    // Verificar jogadores existentes no clube
+    if (lastNames.length > 0) {
+        lastName = this.weightedRandomSelect(lastNames);
+    } else {
+        lastName = defaultLastNames[Math.floor(Math.random() * defaultLastNames.length)];
+    }
+    
+    return `${firstName} ${lastName}`;
+},
+
+generateYouthPlayer(clubId) {
+    const club = this.getClub(clubId);
+    if (!club) return;
+    
+    const youthLevel = Math.max(1, Math.min(20, club.youth || 1));
+    const lambda = this.YOUTH_LAMBDA_TABLE[youthLevel];
+    
+    let playerCountryId = this.resolvePlayerCountry(club.countryId);
+    let name = this.generatePlayerName(playerCountryId);
+    
+    if (!name) {
+        playerCountryId = club.countryId;
+        name = this.generatePlayerName(playerCountryId);
+        if (!name) return;
+    }
+    
+    const age = 16 + Math.floor(Math.random() * 4);
+    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+    const dob = currentYear - age;
+    
+    let rating = this.poisson(lambda.rating - 40) + 40;
+    rating = Math.max(30, Math.min(95, rating));
+    
+    let potentialGain = this.poisson(lambda.potential);
+    potentialGain = Math.max(1, potentialGain);
+    const ratingPotential = Math.min(99, rating + potentialGain);
+    
+    const roles = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const role = roles[Math.floor(Math.random() * roles.length)];
+    
+    this.players.push({
+        id: `youth_${clubId}_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`,
+        name,
+        rating,
+        ratingPotential,
+        clubId,
+        countryId: playerCountryId,
+        role,
+        dob,
+        retired: false,
+        isYouth: true
+    });
+},
+
+generateFicticiousPlayers(clubId, count) {
+    const club = this.getClub(clubId);
+    if (!club) return;
+
+    const minPositions = {
+        1: 2, 2: 3, 3: 3, 4: 4, 5: 3, 6: 3, 7: 3, 8: 4, 9: 4
+    };
+
     const existingPlayers = this.players.filter(p => p.clubId === clubId && !p.retired);
     const existingByRole = {};
-    existingPlayers.forEach(p => {
-        existingByRole[p.role] = (existingByRole[p.role] || 0) + 1;
-    });
-    
-    // Calcular quantos faltam para atingir o mínimo de cada posição
+    existingPlayers.forEach(p => existingByRole[p.role] = (existingByRole[p.role] || 0) + 1);
+
     const neededPositions = [];
     Object.entries(minPositions).forEach(([role, min]) => {
         const roleNum = parseInt(role);
         const existing = existingByRole[roleNum] || 0;
         const needed = Math.max(0, min - existing);
-        for (let i = 0; i < needed; i++) {
-            neededPositions.push(roleNum);
-        }
+        for (let i = 0; i < needed; i++) neededPositions.push(roleNum);
     });
-    
-    // Se count for maior que as posições necessárias, completar com posições aleatórias
+
     const totalNeeded = Math.max(count, neededPositions.length);
     const rolesToGenerate = [...neededPositions];
-    
-    // Adicionar posições extras aleatórias se necessário
     const allRoles = [1, 2, 3, 4, 5, 6, 7, 8, 9];
     while (rolesToGenerate.length < totalNeeded) {
         rolesToGenerate.push(allRoles[Math.floor(Math.random() * allRoles.length)]);
     }
-    
+
     for (let i = 0; i < totalNeeded; i++) {
-        // Escolher nome baseado em peso
-        let firstName, lastName;
-        
-        if (firstNames.length > 0) {
-            firstName = this.weightedRandomSelect(firstNames);
-        } else {
-            firstName = defaultFirstNames[Math.floor(Math.random() * defaultFirstNames.length)];
-        }
-        
-        if (lastNames.length > 0) {
-            lastName = this.weightedRandomSelect(lastNames);
-        } else {
-            lastName = defaultLastNames[Math.floor(Math.random() * defaultLastNames.length)];
-        }
-        
-        const fullName = `${firstName} ${lastName}`;
-        
-// ============================================
-        // JOGADORES GERADOS POR FALTA NO ELENCO
-        // Rating entre -10 e +3 do rating do clube
-        // Potencial SEMPRE maior que o rating (diferente de youth!)
-        // ============================================
-        
+        const playerCountryId = club.countryId;
+        let name = this.generatePlayerName(playerCountryId);
+        if (!name) continue;
+
         const teamRating = club.rating || 50;
-        
-        // Rating: -10 a +3 do rating do clube (distribuição normal centralizada)
-        const variation = (Math.random() + Math.random() + Math.random()) / 3; // 0 a 1, centralizado
-        const ratingOffset = -3 + variation * 2; // Range de -10 a +3
+        const variation = (Math.random() + Math.random() + Math.random()) / 3;
+        const ratingOffset = -10 + variation * 14;
         let rating = Math.round(teamRating + ratingOffset);
-        
-        // Limitar rating entre 30 e 90
         rating = Math.max(30, Math.min(97, rating));
-        
-        // Potencial: SEMPRE entre +3 e +10 acima do rating (nunca igual!)
-        const potentialGain = 3 + Math.floor(Math.random() * 8); // 3 a 10
-        let finalPotential = Math.min(99, rating + potentialGain);
-        
-        // Posição definida pela distribuição mínima
+
+        const potentialGain = 0;
+        const finalPotential = Math.min(99, rating + potentialGain);
+
         const role = rolesToGenerate[i];
-        
-        // Idade entre 17 e 35
         const currentYear = new Date().getFullYear() + this.seasonHistory.length;
         const age = 22 + Math.floor(Math.random() * 4);
         const dob = currentYear - age;
-        
-        const newPlayer = {
+
+        this.players.push({
             id: `gen_${clubId}_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 5)}`,
-            name: fullName,
+            name,
             rating: Math.round(rating),
             ratingPotential: Math.round(finalPotential),
-            clubId: clubId,
-            countryId: club.countryId,
-            role: role,
-            dob: dob,
+            clubId,
+            countryId: playerCountryId,
+            role,
+            dob,
             retired: false
-        };
-        
-        this.players.push(newPlayer);
+        });
     }
 },
-
 // Seleção ponderada por peso
 weightedRandomSelect(items) {
     const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
@@ -1643,7 +1707,7 @@ simulateGoalScorers(lineup, goals) {
         let scorer = null;
         
         weights.forEach(({ player, weight }) => {
-            const lambda = weight / 50; // Normalizar para poisson
+            const lambda = weight / 16; // Normalizar para poisson
             const poissonValue = this.poisson(lambda) + Math.random(); // Adicionar aleatoriedade
             if (poissonValue > maxPoisson) {
                 maxPoisson = poissonValue;
@@ -1729,7 +1793,6 @@ addPlayerGame(playerId) {
     stat.games++;
 },
 
-// Evoluir jogadores no final da temporada
 evolvePlayersEndOfSeason() {
     const currentYear = new Date().getFullYear() + this.seasonHistory.length;
     
@@ -1738,32 +1801,59 @@ evolvePlayersEndOfSeason() {
         
         const age = currentYear - player.dob;
         
-        // Aposentadoria
+        // =====================
+        // APOSENTADORIA
+        // =====================
         if (age >= 33) {
-            const retireChance = (age - 32) * 0.1; // 10% aos 33, 20% aos 34, etc.
+            const retireChance = Math.min(0.8, (age - 32) * 0.1);
             if (Math.random() < retireChance) {
                 player.retired = true;
                 return;
             }
             
-            // Perda de rating após 33
-            const ratingLoss = (age - 32) * 0.5 * Math.random();
-            player.rating = Math.max(20, player.rating - ratingLoss);
+            // Queda progressiva após 33
+            const decline = (age - 32) * (0.4 + Math.random() * 0.6);
+            player.rating = Math.max(20, player.rating - decline);
+            return;
         }
         
-        // Evolução até o potencial
-        if (player.rating < player.ratingPotential && age < 30) {
-            const growthFactor = age < 23 ? 3 : (age < 27 ? 2 : 1);
-            const maxGrowth = (player.ratingPotential - player.rating) * 0.45;
-            const growth = Math.random() * growthFactor * maxGrowth / 3;
-            player.rating = Math.min(player.ratingPotential, player.rating + growth);
+        // =====================
+        // EVOLUÇÃO
+        // =====================
+        if (player.rating >= player.ratingPotential) return;
+        
+        // Fator de crescimento por idade
+        let growthFactor =
+            age <= 18 ? 4.5 :
+            age <= 21 ? 3.8 :
+            age <= 24 ? 2.8 :
+            age <= 27 ? 1.6 :
+            age <= 30 ? 0.8 : 0;
+        
+        if (growthFactor <= 0) return;
+        
+        let growth = Math.random() * growthFactor;
+        
+        // Bônus para jogadores da base jovem
+        if (player.isYouth && age <= 22) {
+            growth *= 1.3;
         }
+        
+        // Limite anual realista
+        const maxAnnualGrowth =
+            age <= 18 ? 6 :
+            age <= 21 ? 5 :
+            age <= 24 ? 4 :
+            age <= 27 ? 3 : 2;
+        
+        growth = Math.min(growth, maxAnnualGrowth);
+        
+        player.rating = Math.min(
+            player.ratingPotential,
+            player.rating + growth
+        );
     });
 },
-
-// ============= SISTEMA DE CONTRATAÇÕES =============
-
-// Executar janela de transferências
 runTransferWindow() {
     // Limpar ofertas rejeitadas da temporada anterior
     this.rejectedOffers = [];
@@ -1914,8 +2004,9 @@ processClubTransfers(club, transferList) {
     const idealCount = { 1: 2, 2: 2, 3: 2, 4: 4, 5: 2, 6: 2, 7: 2, 8: 4, 9: 3 };
     
     // Quantos jogadores o clube consegue comprar com orçamento médio
+    if (transferList.length === 0) return;
     const avgPlayerValue = transferList.reduce((s, t) => s + t.value, 0) / transferList.length;
-    const possibleBuys = Math.max(1, Math.floor(remainingBudget / avgPlayerValue));
+    const possibleBuys = avgPlayerValue > 0 ? Math.max(1, Math.floor(remainingBudget / avgPlayerValue)) : 1;
     
     // Criar fila de posições fracas, repetindo mais vezes as mais abaixo da média
     let needs = this.analyzeTeamNeeds(club, clubPlayers);
@@ -2125,7 +2216,7 @@ executeTransfer(player, sellingClub, buyingClub, value) {
     const sellerPlayers = this.players.filter(p => p.clubId === sellingClub.id && !p.retired && p.id !== player.id);
     const samePositionPlayers = sellerPlayers.filter(p => p.role === player.role);
     
-    if (samePositionPlayers.length < 1 || sellerPlayers.length < 20) return false;
+    if (samePositionPlayers.length < 1 || sellerPlayers.length < 11) return false;
     if (buyingClub.transferBalance < value) return false;
     
     player.clubId = buyingClub.id;
@@ -2261,11 +2352,14 @@ calcPlayerValue(player) {
     return base * m_pot * m_idade * m_pos; // ✅ SEM multiplicador final
 },
 
-// Formatar valor
 formatValue(valor) {
-    if (valor >= 1000000) return "€" + (valor / 1000000).toFixed(2) + "M";
-    if (valor >= 1000) return "€" + (valor / 1000).toFixed(1) + "K";
-    return "€" + valor.toFixed(0);
+    if (valor >= 1000000) {
+        return "$" + Math.floor(valor / 100000) / 10 + "M";
+    }
+    if (valor >= 1000) {
+        return "$" + Math.floor(valor / 1000) + "K";
+    }
+    return "$" + Math.floor(valor);
 },
 
 // Revelar jogadores da academia juvenil no início da temporada
@@ -2284,127 +2378,21 @@ revealYouthPlayers() {
         }
     });
 },
-
-generateYouthPlayer(clubId) {
-    const club = this.getClub(clubId);
-    if (!club) return;
-
-    const youthLevel = Math.max(1, Math.min(20, club.youth || 1));
-
-    // =====================
-    // NOMES (APENAS DO BANCO)
-    // =====================
-    const countryNames = this.playerFicticiousNames.filter(
-        n => n.countryId === club.countryId
-    );
-
-    const firstNames = countryNames.filter(n => n.firstName === 0);
-    const lastNames  = countryNames.filter(n => n.firstName === 1);
-
-    // Sem nome? Sem jogador.
-    if (!firstNames.length || !lastNames.length) return;
-
-    const firstName = this.weightedRandomSelect(firstNames);
-    const lastName  = this.weightedRandomSelect(lastNames);
-
-    const name = `${firstName} ${lastName}`;
-
-    // =====================
-    // IDADE
-    // =====================
-    const age = 16 + Math.floor(Math.random() * 4); // 16–19
-    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
-    const dob = currentYear - age;
-    const ageBonus = age >= 18 ? 1 : 0;
-
-    // =====================
-    // FUNÇÃO NORMAL
-    // =====================
-    const randomNormal = (mean, deviation) => {
-        let u = 0, v = 0;
-        while (u === 0) u = Math.random();
-        while (v === 0) v = Math.random();
-        return mean + deviation * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-    };
-
-    // =====================
-    // RATING
-    // =====================
-    const ratingMean = 45 + youthLevel * 0.9;
-    const ratingDeviation = 8 - youthLevel * 0.15;
-
-    let rating = Math.round(
-        randomNormal(ratingMean, ratingDeviation) + ageBonus
-    );
-
-    rating = Math.max(35, Math.min(72, rating));
-
-    // =====================
-    // POTENCIAL
-    // =====================
-    const potentialBaseGain = 6 + youthLevel * 1.2;
-    const potentialDeviation = 6 - youthLevel * 0.1;
-
-    let potentialGain = Math.round(
-        randomNormal(potentialBaseGain, potentialDeviation)
-    );
-
-    // ⭐ Milagre
-    if (Math.random() < youthLevel / 300) {
-        potentialGain += 10 + Math.floor(Math.random() * 10);
-    }
-
-    // 🪨 Decepção
-    if (Math.random() < (25 - youthLevel) / 300) {
-        potentialGain -= 5 + Math.floor(Math.random() * 6);
-    }
-
-    potentialGain = Math.max(3, potentialGain);
-
-    const ratingPotential = Math.min(99, rating + potentialGain);
-
-    // =====================
-    // POSIÇÃO
-    // =====================
-    const roles = [1,2,3,4,5,6,7,8,9];
-    const role = roles[Math.floor(Math.random() * roles.length)];
-
-    // =====================
-    // CRIAÇÃO
-    // =====================
-    const newPlayerId = `youth_${clubId}_${Date.now()}_${Math.random()
-        .toString(36)
-        .substr(2, 8)}`;
-
-    this.players.push({
-        id: newPlayerId,
-        name,
-        rating,
-        ratingPotential,
-        clubId,
-        countryId: club.countryId,
-        role,
-        dob,
-        retired: false,
-        isYouth: true
-    });
-},
-// Calcular custo de upgrade do Youth
 getYouthUpgradeCost(currentLevel) {
     if (currentLevel >= 20) return null; // Já está no máximo
     
-    const baseValue = 2000; // 2K
+    const baseValue = 10000; // base mais cara
     let cost = baseValue;
     
     for (let level = 1; level < currentLevel; level++) {
         if (level < 12) {
-            cost *= 2; // Dobra até nível 12
+            cost *= 2; // Dobra até o nível 12
         } else {
-            cost *= 1.4; // Multiplica por 1.4 a partir do nível 13
+            cost *= 1.4; // Depois cresce mais devagar (mas ainda dói)
         }
     }
     
-    // Retorna o custo para o PRÓXIMO nível
+    // Custo para subir para o PRÓXIMO nível
     if (currentLevel < 12) {
         return Math.round(cost * 2);
     } else {
@@ -2471,7 +2459,95 @@ distributeAwards(stageId, standings) {
         this.clubsMap = new Map(this.clubs.map(c => [c.id, c]));
     },
 
+    buildCountriesMaps() {
+        this.countriesMap = new Map(this.countries.map(c => [c.id, c]));
+        this.countriesByContinent = new Map();
+        this.countries.forEach(c => {
+            if (!c.continentId) return;
+            if (!this.countriesByContinent.has(c.continentId)) {
+                this.countriesByContinent.set(c.continentId, []);
+            }
+            this.countriesByContinent.get(c.continentId).push(c);
+        });
+    },
+
+    // Determinar o país de um jogador gerado baseado na tabela PlayerYouthReveal
+    // Se a tabela tem entradas para o país do clube, usa as probabilidades definidas
+    // A % que sobrar: 90% mesmo continente, 10% país totalmente aleatório
+    resolvePlayerCountry(clubCountryId) {
+        const reveals = this.playerYouthReveal.filter(r => r.countryId === clubCountryId);
+        
+        if (reveals.length > 0) {
+            const totalDefinedProb = reveals.reduce((sum, r) => sum + r.probability, 0);
+            const roll = Math.random() * 100;
+            
+            // Verificar se cai em algum país definido na tabela
+            let cumulative = 0;
+            for (const reveal of reveals) {
+                cumulative += reveal.probability;
+                if (roll < cumulative) {
+                    return reveal.countryPlayerId;
+                }
+            }
+            
+            // Se não caiu em nenhum país definido, estamos na % restante
+            // 90% mesmo continente, 10% país totalmente aleatório
+            const remainingRoll = Math.random();
+            
+            const clubCountry = this.countriesMap ? this.countriesMap.get(clubCountryId) : this.countries.find(c => c.id === clubCountryId);
+            if (!clubCountry || !clubCountry.continentId) {
+                return clubCountryId; // fallback
+            }
+            
+            if (remainingRoll < 0.9) {
+                // 90% da sobra: mesmo continente
+                const sameContinent = this.countriesByContinent ? 
+                    this.countriesByContinent.get(clubCountry.continentId) : 
+                    this.countries.filter(c => c.continentId === clubCountry.continentId);
+                
+                if (sameContinent && sameContinent.length > 1) {
+                    const otherCountries = sameContinent.filter(c => c.id !== clubCountryId);
+                    if (otherCountries.length > 0) {
+                        return otherCountries[Math.floor(Math.random() * otherCountries.length)].id;
+                    }
+                }
+                return clubCountryId; // fallback
+            } else {
+                // 10% da sobra: país totalmente aleatório
+                const allOtherCountries = this.countries.filter(c => c.id !== clubCountryId && c.continentId);
+                if (allOtherCountries.length > 0) {
+                    return allOtherCountries[Math.floor(Math.random() * allOtherCountries.length)].id;
+                }
+                return clubCountryId; // fallback
+            }
+        }
+        
+        // Fallback se não há entradas na tabela: 90% mesmo continente, 10% aleatório
+        const clubCountry = this.countriesMap ? this.countriesMap.get(clubCountryId) : this.countries.find(c => c.id === clubCountryId);
+        if (!clubCountry || !clubCountry.continentId) {
+            return clubCountryId;
+        }
+        
+        if (Math.random() < 0.9) {
+            const sameContinent = this.countriesByContinent ? 
+                this.countriesByContinent.get(clubCountry.continentId) : 
+                this.countries.filter(c => c.continentId === clubCountry.continentId);
+            
+            if (sameContinent && sameContinent.length > 0) {
+                return sameContinent[Math.floor(Math.random() * sameContinent.length)].id;
+            }
+            return clubCountryId;
+        }
+        
+        const allOtherCountries = this.countries.filter(c => c.id !== clubCountryId && c.continentId);
+        if (allOtherCountries.length > 0) {
+            return allOtherCountries[Math.floor(Math.random() * allOtherCountries.length)].id;
+        }
+        return clubCountryId;
+    },
+
     async loadLogo(id) {
+        if (!id) return "";
         if (this.logoCache.has(id)) return this.logoCache.get(id);
         if (!this.zipData) return "";
         try {
@@ -2488,6 +2564,7 @@ distributeAwards(stageId, standings) {
     },
 
     async loadFlag(countryId) {
+        if (!countryId) return "";
         if (this.flagCache.has(countryId)) return this.flagCache.get(countryId);
         if (!this.zipData) return "";
         try {
@@ -2503,10 +2580,18 @@ distributeAwards(stageId, standings) {
         }
     },
 
+    // PERF: Poisson with exp cache - avoids repeated Math.exp() for same lambda values
     poisson(lambda) {
         if (lambda <= 0) return 0;
-        let L = Math.exp(-lambda), k = 0, p = 1;
-        while (p > L) { k++; p *= Math.random(); }
+        // Round to 2 decimals to maximize cache hits
+        const key = (lambda * 100 | 0);
+        let L = this._poissonExpCache.get(key);
+        if (L === undefined) {
+            L = Math.exp(-lambda);
+            this._poissonExpCache.set(key, L);
+        }
+        let k = 0, p = 1;
+        do { k++; p *= Math.random(); } while (p > L);
         return k - 1;
     },
 
@@ -2557,7 +2642,11 @@ distributeAwards(stageId, standings) {
         );
     },
 
-    async simulateSingleSeason() {
+    async simulateSingleSeason(onProgress = null) {
+        // IMPORTANTE: Invalidar cache de jogadores no início de cada temporada
+        // para garantir que transferências, aposentadorias e novos jogadores sejam refletidos
+        this.invalidatePlayerCache();
+        
         // Times decidem se investem no upgrade do Youth
         this.processYouthUpgrades();
         
@@ -2571,6 +2660,9 @@ distributeAwards(stageId, standings) {
                 this.generateFicticiousPlayers(club.id, 20 - clubPlayers.length);
             }
         });
+        
+        // Invalidar cache novamente após gerar jogadores fictícios
+        this.invalidatePlayerCache();
         
         // Simular TODAS as competições de TODOS os países
         // (Reset de classificações é feito NO FINAL da temporada, após aplicar promoções)
@@ -2614,7 +2706,15 @@ distributeAwards(stageId, standings) {
             this.nextSeasonInjections = new Map();
         }
         
-        for (const competition of allCompetitions) {
+        for (let ci = 0; ci < allCompetitions.length; ci++) {
+            const competition = allCompetitions[ci];
+            
+            // Callback de progresso
+            if (onProgress) {
+                onProgress(competition.name, ci, allCompetitions.length);
+                await new Promise(r => setTimeout(r, 0)); // Yield para atualizar UI
+            }
+            
             let competitionResult;
             if (competition.type === 0) {
                 const clubs = this.clubs.filter(c => c.competitions.includes(competition.id));
@@ -2622,7 +2722,19 @@ distributeAwards(stageId, standings) {
                     continue;
                 }
                 
-                competitionResult = await this.simulateSimpleLeague(clubs, competition, true, sharedStageResults, crossQualified);
+                // Verificar se a competição tipo 0 tem múltiplos stages
+                // Se sim, usar simulateCompetition para processar transições entre stages
+                const compStages = this.competitionStages.filter(s => {
+                    const compIds = s.competitionId.split(',').map(id => id.trim());
+                    return compIds.includes(competition.id);
+                });
+                
+                if (compStages.length > 1) {
+                    // Múltiplos stages: usar simulateCompetition para processar transições corretamente
+                    competitionResult = await this.simulateCompetition(competition, true, sharedStageResults, crossQualified);
+                } else {
+                    competitionResult = await this.simulateSimpleLeague(clubs, competition, true, sharedStageResults, crossQualified);
+                }
             } else {
                 competitionResult = await this.simulateCompetition(competition, true, sharedStageResults, crossQualified);
             }
@@ -2657,6 +2769,9 @@ distributeAwards(stageId, standings) {
         // Janela de transferências
         this.runTransferWindow();
         
+        // Invalidar cache após transferências para que a próxima temporada use dados atualizados
+        this.invalidatePlayerCache();
+        
         // Guardar relatório de transferências na temporada
         seasonResult.transfers = this.getTransferReport();
         seasonResult.rejectedOffers = this.getRejectedOffersReport();
@@ -2668,7 +2783,7 @@ distributeAwards(stageId, standings) {
 
     async simulateSimpleLeague(clubs, competition, saveToSeason = false, sharedStageResults = new Map(), crossQualified = new Map()) {
         const mainStage = this.competitionStages.find(s =>
-            s.competitionId.split(',').map(id => id.trim()).includes(competition.id) && s.isLastStage
+            s.competitionId.split(',').map(id => id.trim()).includes(competition.id) && s.isWinnerDecisionStage
         ) || this.competitionStages.find(s => s.competitionId.split(',').map(id => id.trim()).includes(competition.id));
         
         if (!mainStage) {
@@ -2691,10 +2806,11 @@ distributeAwards(stageId, standings) {
             };
         }
         
-        const baseStageClubs = this.clubs.filter(club => club.stages.includes(mainStage.id));
+        const baseStageClubs = this.clubs.filter(club => club.stages.includes(mainStage.id) && club.originalStages.includes(mainStage.id));
         const extra = crossQualified.get(mainStage.id) || [];
         const uniqueMap = new Map();
-        [...baseStageClubs, ...extra].forEach(t => { if (t && !uniqueMap.has(t.id)) uniqueMap.set(t.id, t); });
+        // Combina clubs do parâmetro, clubs do stage, e extras (crossQualified)
+        [...clubs, ...baseStageClubs, ...extra].forEach(t => { if (t && !uniqueMap.has(t.id)) uniqueMap.set(t.id, t); });
         const allStageClubs = Array.from(uniqueMap.values());
         
         const stageResult = await this.simulateStage(mainStage, allStageClubs);
@@ -2779,6 +2895,21 @@ distributeAwards(stageId, standings) {
     },
 
     processTransition(competition, stage, transition, standings, groups, playoffBracket) {
+        // Pular transições type 106 no fim da temporada - elas são processadas durante a simulação.
+        // Re-aplicá-las no fim da temporada cria "fantasmas" em stages de competições limpas (Copa Nacional, etc.)
+        if (transition.type === 106) return;
+        
+        // CORREÇÃO: Pular transições internas (mesma competição) - já processadas durante simulateCompetition.
+        // Sem isso, handlePromotionRelegation re-adiciona stages da Copa aos clubes, causando acúmulo de times.
+        const targetStage = this.competitionStages.find(s => s.id === transition.stageIdTo);
+        if (targetStage) {
+            const sourceCompIds = stage.competitionId.split(',').map(id => id.trim());
+            const targetCompIds = targetStage.competitionId.split(',').map(id => id.trim());
+            const sameCompetition = sourceCompIds.some(id => targetCompIds.includes(id));
+if (sameCompetition && transition.type !== 0) return;
+
+        }
+        
         let teamsToMove = [];
         
         if (transition.place === -1) {
@@ -2801,30 +2932,12 @@ distributeAwards(stageId, standings) {
     },
     
     getEligibleTeamsWithFallback(originalTeams, transition, standings, groups, currentCompetition) {
-        const eligibleTeams = [];
-        let currentPosition = transition.place;
-        const maxPositions = this.getMaxPositions(standings, groups);
-        
-        while (eligibleTeams.length < originalTeams.length && currentPosition <= maxPositions) {
-            const teamsAtPosition = this.getTeamsByPosition(null, currentPosition, standings, groups);
-            
-            teamsAtPosition.forEach(teamData => {
-                if (eligibleTeams.length < originalTeams.length) {
-                    const club = this.getClub(teamData.id);
-                    const targetStage = this.competitionStages.find(s => s.id === transition.stageIdTo);
-                    
-                    if (club && targetStage && this.isTeamEligibleForTransition(club, targetStage, transition, currentCompetition)) {
-                        if (!eligibleTeams.find(t => t.id === teamData.id)) {
-                            eligibleTeams.push(teamData);
-                        }
-                    }
-                }
-            });
-            
-            currentPosition++;
-        }
-        
-        return eligibleTeams;
+        // Sem fallback - retorna apenas os times da posição exata indicada no CompetitionStageTransition
+        return originalTeams.filter(teamData => {
+            const club = this.getClub(teamData.id);
+            const targetStage = this.competitionStages.find(s => s.id === transition.stageIdTo);
+            return club && targetStage && this.isTeamEligibleForTransition(club, targetStage, transition, currentCompetition);
+        });
     },
     
     isTeamEligibleForTransition(club, targetStage, transition, currentCompetition) {
@@ -2929,9 +3042,14 @@ distributeAwards(stageId, standings) {
         });
         
         competitionsToRemove.forEach(compId => {
+            // Remove de competitions e originalCompetitions
             const index = club.competitions.indexOf(compId);
             if (index !== -1) {
                 club.competitions.splice(index, 1);
+            }
+            const origCompIndex = club.originalCompetitions.indexOf(compId);
+            if (origCompIndex !== -1) {
+                club.originalCompetitions.splice(origCompIndex, 1);
             }
             
             const stagesToRemove = this.competitionStages
@@ -2939,9 +3057,14 @@ distributeAwards(stageId, standings) {
                 .map(s => s.id);
             
             stagesToRemove.forEach(stageId => {
+                // Remove de stages e originalStages
                 const stageIndex = club.stages.indexOf(stageId);
                 if (stageIndex !== -1) {
                     club.stages.splice(stageIndex, 1);
+                }
+                const origStageIndex = club.originalStages.indexOf(stageId);
+                if (origStageIndex !== -1) {
+                    club.originalStages.splice(origStageIndex, 1);
                 }
             });
         });
@@ -2950,10 +3073,16 @@ distributeAwards(stageId, standings) {
             if (!club.competitions.includes(compId)) {
                 club.competitions.push(compId);
             }
+            if (!club.originalCompetitions.includes(compId)) {
+                club.originalCompetitions.push(compId);
+            }
         });
         
         if (!club.stages.includes(targetStage.id)) {
             club.stages.push(targetStage.id);
+        }
+        if (!club.originalStages.includes(targetStage.id)) {
+            club.originalStages.push(targetStage.id);
         }
     },
     
@@ -2983,10 +3112,16 @@ distributeAwards(stageId, standings) {
             if (!club.competitions.includes(compId)) {
                 club.competitions.push(compId);
             }
+            if (!club.originalCompetitions.includes(compId)) {
+                club.originalCompetitions.push(compId);
+            }
         });
         
         if (!club.stages.includes(targetStage.id)) {
             club.stages.push(targetStage.id);
+        }
+        if (!club.originalStages.includes(targetStage.id)) {
+            club.originalStages.push(targetStage.id);
         }
     },
 
@@ -3106,10 +3241,17 @@ resetContinentalQualifications() {
         
         try {
             this.initializeTitles();
+            this.clubFormations = new Map(); // Resetar formações
+            this.playerStatsCache = null; // Resetar cache de stats
+            this.currentStatsYear = 0;
+            this.nextSeasonInjections = new Map();
+            this.rejectedOffers = [];
             this.clubs.forEach(club => { 
                 club.rating = club.originalRating; 
-                club.competitions = [...club.originalCompetitions];
-                club.stages = [...club.originalStages];
+                club.competitions = [...club.dbOriginalCompetitions];
+                club.stages = [...club.dbOriginalStages];
+                club.originalCompetitions = [...club.dbOriginalCompetitions];
+                club.originalStages = [...club.dbOriginalStages];
             });
             
             const numSeasons = parseInt(document.getElementById("numSeasons").value); 
@@ -3176,24 +3318,75 @@ resetContinentalQualifications() {
         if (button.disabled) return;
         
         button.disabled = true;
+        const originalText = button.textContent;
+        
+        // Criar ou pegar container de progresso
+        let progressContainer = document.getElementById("seasonProgress");
+        if (!progressContainer) {
+            progressContainer = document.createElement("div");
+            progressContainer.id = "seasonProgress";
+            progressContainer.style.padding = "10px";
+            progressContainer.style.backgroundColor = "#f0f0f0";
+            progressContainer.style.marginBottom = "10px";
+            progressContainer.style.borderRadius = "5px";
+            progressContainer.style.textAlign = "center";
+            progressContainer.style.fontWeight = "bold";
+            document.getElementById("season").prepend(progressContainer);
+        }
+        
+        // Criar barra de progresso
+        let progressBar = document.getElementById("seasonProgressBar");
+        if (!progressBar) {
+            progressBar = document.createElement("div");
+            progressBar.id = "seasonProgressBar";
+            progressBar.style.width = "100%";
+            progressBar.style.backgroundColor = "#ddd";
+            progressBar.style.borderRadius = "4px";
+            progressBar.style.overflow = "hidden";
+            progressBar.style.height = "8px";
+            progressBar.style.marginTop = "6px";
+            progressBar.innerHTML = '<div id="seasonProgressFill" style="height:100%;width:0%;background:linear-gradient(90deg,#2196F3,#4CAF50);transition:width 0.2s;border-radius:4px;"></div>';
+            progressContainer.appendChild(progressBar);
+        }
+        progressBar.style.display = "block";
+        const progressFill = document.getElementById("seasonProgressFill") || progressBar.querySelector("div");
+        
         try {
             const nextSeason = this.seasonHistory.length + 1; 
             this.currentSeason = nextSeason;
-            const seasonResult = await this.simulateSingleSeason();
+            
+            // Callback de progresso para mostrar qual competição está sendo simulada
+            const onProgress = (competitionName, index, total) => {
+                const percent = ((index + 1) / total * 100).toFixed(0);
+                progressContainer.childNodes[0].textContent = `Simulando ${competitionName}...`;
+                progressFill.style.width = `${percent}%`;
+                button.textContent = `Simulando... ${percent}%`;
+            };
+            
+            progressContainer.innerHTML = '';
+            const textNode = document.createElement("span");
+            textNode.textContent = `Simulando Temporada ${nextSeason}...`;
+            progressContainer.appendChild(textNode);
+            progressContainer.appendChild(progressBar);
+            progressContainer.style.backgroundColor = "#fff3cd";
+            progressContainer.style.color = "#856404";
+            progressFill.style.width = "0%";
+            
+            const seasonResult = await this.simulateSingleSeason(onProgress);
             if (seasonResult) { 
                 this.updateSeasonSelects(); 
                 const seasonSelector = document.getElementById("viewSeason"); 
                 seasonSelector.value = nextSeason; 
                 this.viewSeason(nextSeason); 
                 
-                const progressContainer = document.getElementById("seasonProgress");
-                if (progressContainer) {
-                    progressContainer.textContent = `✅ Temporada ${nextSeason} simulada com sucesso`;
-                    progressContainer.style.backgroundColor = "#d4edda";
-                }
+                progressContainer.querySelector("span").textContent = `✅ Temporada ${nextSeason} simulada com sucesso`;
+                progressContainer.style.backgroundColor = "#d4edda";
+                progressContainer.style.color = "#155724";
+                progressFill.style.width = "100%";
             }
         } finally { 
             button.disabled = false; 
+            button.textContent = originalText;
         }
     },
 
@@ -3395,7 +3588,7 @@ competitionTypeNames: {
         document.getElementById("viewPlayoffBtn").style.display = 'none';
         document.getElementById("seasonTransfers").style.display = 'none';
         const transfersBtn = document.getElementById("viewTransfersBtn");
-        if (transfersBtn) transfersBtn.innerHTML = '<i class="fas fa-exchange-alt"></i> Ver Transferências';
+        if (transfersBtn) transfersBtn.innerHTML = 'Ver Transferências';
     },
 
     viewCompetition() {
@@ -3616,13 +3809,13 @@ competitionTypeNames: {
             matches.style.display = "none";
             playoff.style.display = "none";
             transfers.style.display = "block";
-            button.innerHTML = '<i class="fas fa-table"></i> Ver Tabela';
+            button.innerHTML = 'Ver Tabela';
             await this.displayTransfers();
         } else {
             standings.style.display = "block";
             matches.style.display = "block";
             transfers.style.display = "none";
-            button.innerHTML = '<i class="fas fa-exchange-alt"></i> Ver Transferências';
+            button.innerHTML = 'Ver Transferências';
         }
     },
 
@@ -3638,7 +3831,6 @@ competitionTypeNames: {
             container.innerHTML = `  
             <div class="section-card">  
                 <div class="section-header">  
-                    <i class="fas fa-exchange-alt"></i>  
                     <h2>Transferências - T${this.currentSeason}</h2>  
                 </div>  
                 <p style="text-align: center; color: #888; padding: 10px;">Nenhuma transferência.</p>  
@@ -3682,12 +3874,9 @@ competitionTypeNames: {
                 
                 transfersHtml += `  
                 <div style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #e8e8e8; font-size: 13px; background: #f8fff8;">  
-                    <i class="fas fa-check-circle" style="color: #4CAF50; font-size: 12px;"></i>  
-<span style="flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
     ${playerFlag ? `<img src="${playerFlag}" alt="" class="flag-icon">` : ''}${transfer.player}
 </span>
                     ${fromLogo ? `<img src="${fromLogo}" alt="" style="width: 20px; height: 20px; object-fit: contain;">` : '<span style="width:20px;"></span>'}  
-                    <i class="fas fa-arrow-right" style="color: #4CAF50; font-size: 10px;"></i>  
                     ${toLogo ? `<img src="${toLogo}" alt="" style="width: 20px; height: 20px; object-fit: contain;">` : '<span style="width:20px;"></span>'}  
                     <span style="color: #2196F3; font-weight: 600; font-size: 12px; white-space: nowrap;">${transfer.value}</span>  
                 </div>  
@@ -3705,15 +3894,12 @@ competitionTypeNames: {
                 
                 rejectedHtml += `  
                 <div style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #f0e0e0; font-size: 12px; background: #fff8f8;">  
-                    <i class="fas fa-times-circle" style="color: #e53935; font-size: 11px;"></i>  
-<span style="flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #666;">
     ${playerFlag ? `<img src="${playerFlag}" alt="" class="flag-icon-small">` : ''}${offer.player}
 </span>
                     ${fromLogo ? `<img src="${fromLogo}" alt="" style="width: 18px; height: 18px; object-fit: contain; opacity: 0.7;">` : '<span style="width:18px;"></span>'}  
-                    <i class="fas fa-arrow-right" style="color: #999; font-size: 9px;"></i>  
                     ${toLogo ? `<img src="${toLogo}" alt="" style="width: 18px; height: 18px; object-fit: contain; opacity: 0.7;">` : '<span style="width:18px;"></span>'}  
                     <span style="color: #e53935; font-size: 10px; white-space: nowrap;" title="Oferta: ${offer.offerValue} | Pedido: ${offer.askingPrice}">  
-                        ${offer.offerValue} <i class="fas fa-ban" style="font-size: 8px;"></i>  
+                        ${offer.offerValue}
                     </span>  
                     <span style="background: #ffebee; color: #c62828; font-size: 9px; padding: 2px 4px; border-radius: 3px; white-space: nowrap;">  
                         ${offer.reason}  
@@ -3726,7 +3912,6 @@ competitionTypeNames: {
         container.innerHTML = `  
         <div class="section-card" style="padding: 8px;">  
             <div class="section-header" style="margin-bottom: 8px;">  
-                <i class="fas fa-exchange-alt"></i>  
                 <span style="font-size: 14px; font-weight: 600;">Transferências - T${this.currentSeason}</span>  
                 <span style="margin-left: auto; font-size: 11px; color: #666;">  
                     <span style="color: #4CAF50;">${seasonData.transfers?.length || 0} ✓</span>  
@@ -3737,7 +3922,7 @@ competitionTypeNames: {
             ${hasTransfers ? `  
                 <div style="margin-bottom: 12px;">  
                     <div style="font-size: 12px; font-weight: 600; color: #2e7d32; padding: 4px 8px; background: #e8f5e9; border-radius: 4px; margin-bottom: 4px;">  
-                        <i class="fas fa-handshake"></i> Transferências Concluídas  
+ Transferências Concluídas  
                     </div>  
                     <div style="max-height: 250px; overflow-y: auto; border-radius: 4px;">  
                         ${transfersHtml}  
@@ -3748,7 +3933,7 @@ competitionTypeNames: {
             ${hasRejected ? `  
                 <div>  
                     <div style="font-size: 12px; font-weight: 600; color: #c62828; padding: 4px 8px; background: #ffebee; border-radius: 4px; margin-bottom: 4px;">  
-                        <i class="fas fa-ban"></i> Ofertas Rejeitadas  
+ Ofertas Rejeitadas  
                     </div>  
                     <div style="max-height: 200px; overflow-y: auto; border-radius: 4px;">  
                         ${rejectedHtml}  
@@ -4052,6 +4237,7 @@ calculateGroupStandingsUpToRound(group, round) {
             const homeTeam = tempStandings[match.home];
             const awayTeam = tempStandings[match.away];
             
+            // Cross-group (stageType 3): only one team may be in this group's standings
             if (homeTeam && awayTeam) {
                 homeTeam.played++;
                 awayTeam.played++;
@@ -4076,6 +4262,22 @@ calculateGroupStandingsUpToRound(group, round) {
                 }
                 
                 homeTeam.goalDifference = homeTeam.goalsFor - homeTeam.goalsAgainst;
+                awayTeam.goalDifference = awayTeam.goalsFor - awayTeam.goalsAgainst;
+            } else if (homeTeam) {
+                homeTeam.played++;
+                homeTeam.goalsFor += match.homeScore;
+                homeTeam.goalsAgainst += match.awayScore;
+                if (match.homeScore > match.awayScore) { homeTeam.won++; homeTeam.points += 3; }
+                else if (match.homeScore < match.awayScore) { homeTeam.lost++; }
+                else { homeTeam.drawn++; homeTeam.points++; }
+                homeTeam.goalDifference = homeTeam.goalsFor - homeTeam.goalsAgainst;
+            } else if (awayTeam) {
+                awayTeam.played++;
+                awayTeam.goalsFor += match.awayScore;
+                awayTeam.goalsAgainst += match.homeScore;
+                if (match.awayScore > match.homeScore) { awayTeam.won++; awayTeam.points += 3; }
+                else if (match.awayScore < match.homeScore) { awayTeam.lost++; }
+                else { awayTeam.drawn++; awayTeam.points++; }
                 awayTeam.goalDifference = awayTeam.goalsFor - awayTeam.goalsAgainst;
             }
         });
@@ -4231,7 +4433,7 @@ getRelevantTransitions() {
 
     async displayRoundMatches(round, containerId) {
         const container = document.getElementById(containerId);
-        container.innerHTML = `<h3>Rodada ${round}</h3><div class="matches-list"></div>`;
+        container.innerHTML = `<h3></h3><div class="matches-list"></div>`;
         const matchesList = container.querySelector(".matches-list");
         
         if (this.currentGroups.length > 0) {
@@ -4273,28 +4475,43 @@ getRelevantTransitions() {
     },
 
     async displayAllGroupsRoundMatches(round, matchesList) {
-        // Exibe jogos de TODOS os grupos separados por seção
+        // Exibe jogos de TODOS os grupos separados por seção (sem duplicatas para cross-group)
         if (this.currentGroups.length === 0) return;
+        
+        const isCrossGroup = this.currentGroups[0]?.isCrossGroup;
+        const displayedMatchKeys = new Set();
         
         for (const group of this.currentGroups) {
             const groupMatches = group.schedule ? group.schedule[round - 1] : null;
             
             if (!groupMatches || groupMatches.length === 0) continue;
             
+            // Para cross-group, filtrar duplicatas (mesmo jogo pode estar em 2 grupos)
+            const matchesToShow = isCrossGroup 
+                ? groupMatches.filter(m => {
+                    const key = [m.home, m.away].sort().join('-');
+                    if (displayedMatchKeys.has(key)) return false;
+                    displayedMatchKeys.add(key);
+                    return true;
+                })
+                : groupMatches;
+            
+            if (matchesToShow.length === 0) continue;
+            
             // Cabeçalho do grupo
             const groupHeader = document.createElement("div");
             groupHeader.className = "group-matches-header";
-            groupHeader.innerHTML = `<h4 style="margin: 20px 0 10px 0; padding: 10px; background: linear-gradient(to right, #2c3e50, #3498db); color: white; border-radius: 5px; text-align: center;">Grupo ${group.id}</h4>`;
+            groupHeader.innerHTML = `<h4 style="margin: 20px 0 10px 0; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold;">Grupo ${group.id}</h4>`;
             matchesList.appendChild(groupHeader);
             
             const groupMatchesContainer = document.createElement("div");
             groupMatchesContainer.className = "group-matches-container";
             groupMatchesContainer.style.marginBottom = "15px";
             groupMatchesContainer.style.padding = "10px";
-            groupMatchesContainer.style.backgroundColor = "#f8f9fa";
+            groupMatchesContainer.style.backgroundColor = "transparent";
             groupMatchesContainer.style.borderRadius = "5px";
             
-            for (const match of groupMatches) {
+            for (const match of matchesToShow) {
                 const home = this.getClub(match.home);
                 const away = this.getClub(match.away);
                 if (!home || !away) continue;
@@ -4379,7 +4596,7 @@ getRelevantTransitions() {
                 voltaRound.innerHTML = `<h4>${roundName} - Volta</h4>`;
                 
                 for (const match of round.matches) {
-                    if (match.isBye) continue;
+                    
                     
                     const team1 = this.getClub(match.team1.id);
                     const team2 = this.getClub(match.team2.id);
@@ -4435,16 +4652,7 @@ getRelevantTransitions() {
                     const matchDiv = document.createElement("div");
                     matchDiv.className = "playoff-match";
                     
-                    if (match.isBye) {
-                        const team1 = { name: match.team1.name, id: match.team1.id };
-                        const team2 = { name: match.team2.name, id: match.team2.id };
-                        const [team1Logo, team2Logo] = await Promise.all([
-                            this.loadLogo(match.team1.id),
-                            this.loadLogo(match.team2.id)
-                        ]);
-                        this.displayMatchResult(team1, team2, "BYE", "", team1Logo, team2Logo, matchDiv);
-                    } else {
-                        const team1 = this.getClub(match.team1.id);
+                    const team1 = this.getClub(match.team1.id);
                         const team2 = this.getClub(match.team2.id);
                         if (!team1 || !team2) continue;
                         
@@ -4468,7 +4676,6 @@ getRelevantTransitions() {
                             team2Logo,
                             matchDiv
                         );
-                    }
                     roundDiv.appendChild(matchDiv);
                 }
                 container.appendChild(roundDiv);
@@ -4516,34 +4723,33 @@ getRelevantTransitions() {
             // Calcular médias de ataque/defesa baseadas na formação
             const formationStats = this.calculateFormationAverages(teamId);
             
-            const profileHTML = `
-            <div class="profile-buttons" style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px;">
-                <button id="viewTitlesBtn" class="btn btn-primary">Ver Títulos</button>
-                <button id="viewTrajectoryBtn" class="btn btn-primary">Trajetória</button>
-                <button id="viewSquadBtn" class="btn btn-success">Elenco</button>
-            </div>
-<div style="text-align: center;">
-    ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${team.name}" class="logo"></div>` : ''} 
-    ${team.name}
-</div>
-            <p><i class="fas fa-info-circle"></i> <strong>Tipo:</strong> ${teamRelation}</p>
-<p>
-    <i class="fas fa-flag"></i> <strong>País:</strong> 
-    ${flag ? `<img src="${flag}" alt="" class="flag-icon">` : ''}${country}
-</p>
-            <p><i class="fas fa-trophy"></i> <strong>Competições:</strong> ${competitionsText}</p>
-            <p><i class="fas fa-star"></i> <strong>Rating:</strong> ${team.originalRating.toFixed(1)}</p>
-            <p><i class="fas fa-money-bill-wave"></i> <strong>Balanço:</strong> ${this.formatValue(team.transferBalance || 0)}</p>
-            <hr style="margin: 10px 0; border-color: #ddd;">
-            <p><i class="fas fa-child"></i> <strong>Base Juvenil:</strong> ${team.youth || 10}/20</p>
-            <p><i class="fas fa-gamepad"></i> <strong>Formação:</strong> ${formationStats.formation}</p>
-            <p><i class="fas fa-crosshairs"></i> <strong>Média Ataque:</strong> ${formationStats.attack.toFixed(1)}</p>
-            <p><i class="fas fa-shield-alt"></i> <strong>Média Defesa:</strong> ${formationStats.defense.toFixed(1)}</p>
-            ${seasonStats ? `
-                <hr style="margin: 10px 0; border-color: #ddd;">
-                <p><i class="fas fa-chart-line"></i> <strong>Rating da Simulação:</strong> ${seasonStats.currentRating.toFixed(1)}</p>
-            ` : ''}
-        `;
+const profileHTML = `
+    <div class="profile-buttons" style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px;">
+        <button id="viewTitlesBtn" class="btn btn-primary">Ver Títulos</button>
+        <button id="viewTrajectoryBtn" class="btn btn-primary">Trajetória</button>
+        <button id="viewSquadBtn" class="btn btn-success">Elenco</button>
+    </div>
+
+    <div style="text-align: center;">
+        ${logo ? `<div class="logo-wrap"><img src="${logo}" alt="${team.name}" class="logo"></div>` : ''} 
+        ${team.name}
+    </div>
+
+    <p><strong>País:</strong> 
+        ${flag ? `<img src="${flag}" alt="" class="flag-icon">` : ''}${country}
+    </p>
+
+    <p><strong>Competições:</strong> ${competitionsText}</p>
+    <p><strong>Rating:</strong> ${team.originalRating.toFixed(1)}</p>
+    <p><strong>Balanço:</strong> ${this.formatValue(team.transferBalance || 0)}</p>
+
+    <hr style="margin: 10px 0; border-color: #ddd;">
+
+    <p><strong>Base Juvenil:</strong> ${team.youth || 10}/20</p>
+    <p><strong>Formação:</strong> ${formationStats.formation}</p>
+    <p><strong>Ataque:</strong> ${Math.round(formationStats.attack)}</p>
+    <p><strong>Defesa:</strong> ${Math.round(formationStats.defense)}</p>
+`;
             
             document.getElementById('profileContent').innerHTML = profileHTML;
             document.getElementById('teamProfile').style.display = 'block';
@@ -4701,19 +4907,17 @@ async showTeamSquad(teamId) {
         ${flag ? `<img src="${flag}" alt="" class="flag-icon">` : ''}${player.name}
     </h3>
 </div>
-            <p><i class="fas fa-running"></i> <strong>Posição:</strong> ${roleInfo.name}</p>
-<p>
-    <i class="fas fa-flag"></i> <strong>Nacionalidade:</strong> 
+            <p><strong>Posição:</strong> ${roleInfo.name}</p>
+<p><strong>Nacionalidade:</strong> 
     ${flag ? `<img src="${flag}" alt="" class="flag-icon">` : ''}${country}
 </p>
-            <p><i class="fas fa-birthday-cake"></i> <strong>Idade:</strong> ${age} anos (${player.dob})</p>
-            <p><i class="fas fa-star"></i> <strong>Overall:</strong> ${player.rating.toFixed(0)}</p>
-            <p><i class="fas fa-chart-line"></i> <strong>Potencial:</strong> ${player.ratingPotential.toFixed(0)}</p>
-            <p><i class="fas fa-money-bill-wave"></i> <strong>Valor:</strong> ${this.formatValue(value)}</p>
-            <p><i class="fas fa-futbol"></i> <strong>Gols na Carreira:</strong> ${totalGoals}</p>
-            <p><i class="fas fa-gamepad"></i> <strong>Jogos na Carreira:</strong> ${totalGames}</p>
-            ${statsHTML}
-            `;
+<p><strong>Idade:</strong> ${age} anos (${player.dob})</p>
+<p><strong>Overall:</strong> ${player.rating.toFixed(0)}</p>
+<p><strong>Potencial:</strong> ${player.ratingPotential.toFixed(0)}</p>
+<p><strong>Valor:</strong> ${this.formatValue(value)}</p>
+<p><strong>Gols na Carreira:</strong> ${totalGoals}</p>
+<p><strong>Jogos na Carreira:</strong> ${totalGames}</p>
+${statsHTML}`;
             document.getElementById('backToSquadBtn').addEventListener('click', () => this.showTeamSquad(player.clubId));
         });
     },
@@ -4757,6 +4961,363 @@ async showTeamSquad(teamId) {
             document.getElementById('backToProfileBtn').addEventListener('click', () => this.showTeamProfile(teamId));
         });
     },
+    
+    // ==================== SAVE/LOAD SYSTEM ====================
+
+async saveGame() {
+    try {
+        const messageDiv = document.getElementById("saveLoadMessage");
+        messageDiv.innerHTML = "Preparando dados para salvar...";
+        messageDiv.style.color = "#856404";
+        
+        // Criar um novo banco de dados SQLite em memória
+        const SQL = await initSqlJs({
+            locateFile: () => "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.wasm"
+        });
+        const db = new SQL.Database();
+        
+        // Criar tabelas
+        db.run("CREATE TABLE IF NOT EXISTS clubs (id TEXT PRIMARY KEY, name TEXT, rating REAL, countryId TEXT, bTeamOf TEXT, transferBalance INTEGER, youth INTEGER, originalRating REAL, competitions TEXT, stages TEXT, originalCompetitions TEXT, originalStages TEXT, dbOriginalCompetitions TEXT, dbOriginalStages TEXT)");
+        
+        db.run("CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, name TEXT, rating REAL, ratingPotential REAL, clubId TEXT, countryId TEXT, role INTEGER, dob INTEGER, retired INTEGER, isYouth INTEGER)");
+        
+        db.run("CREATE TABLE IF NOT EXISTS playerStats (playerId TEXT, year INTEGER, clubId TEXT, goals INTEGER, games INTEGER, isTransfer INTEGER, fromClub TEXT, transferValue INTEGER, PRIMARY KEY (playerId, year))");
+        
+        db.run("CREATE TABLE IF NOT EXISTS seasonHistory (seasonNumber INTEGER PRIMARY KEY, data TEXT)");
+        
+        db.run("CREATE TABLE IF NOT EXISTS clubFormations (clubId TEXT PRIMARY KEY, formation TEXT)");
+        
+        db.run("CREATE TABLE IF NOT EXISTS teamTitles (clubId TEXT, competitionId TEXT, count INTEGER, PRIMARY KEY (clubId, competitionId))");
+        
+        db.run("CREATE TABLE IF NOT EXISTS rejectedOffers (seasonNumber INTEGER, data TEXT)");
+        
+        db.run("CREATE TABLE IF NOT EXISTS nextSeasonInjections (stageId TEXT, clubIds TEXT, PRIMARY KEY (stageId))");
+        
+        db.run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
+        
+        // Salvar metadata
+        const metaData = {
+            currentSeason: this.currentSeason,
+            seasonHistoryLength: this.seasonHistory.length,
+            saveDate: new Date().toISOString(),
+            version: "1.0"
+        };
+        db.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", 
+            ['gameData', JSON.stringify(metaData)]);
+        
+        // Salvar clubes
+        const clubStmt = db.prepare("INSERT OR REPLACE INTO clubs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        this.clubs.forEach(club => {
+            clubStmt.run([
+                club.id,
+                club.name,
+                club.rating,
+                club.countryId,
+                club.bTeamOf || null,
+                club.transferBalance || 5000000,
+                club.youth || 10,
+                club.originalRating,
+                JSON.stringify(club.competitions || []),
+                JSON.stringify(club.stages || []),
+                JSON.stringify(club.originalCompetitions || []),
+                JSON.stringify(club.originalStages || []),
+                JSON.stringify(club.dbOriginalCompetitions || []),
+                JSON.stringify(club.dbOriginalStages || [])
+            ]);
+        });
+        clubStmt.free();
+        
+        // Salvar jogadores
+        const playerStmt = db.prepare("INSERT OR REPLACE INTO players VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        this.players.forEach(player => {
+            playerStmt.run([
+                player.id,
+                player.name,
+                player.rating,
+                player.ratingPotential,
+                player.clubId,
+                player.countryId,
+                player.role,
+                player.dob,
+                player.retired ? 1 : 0,
+                player.isYouth ? 1 : 0
+            ]);
+        });
+        playerStmt.free();
+        
+        // Salvar estatísticas dos jogadores
+        const statsStmt = db.prepare("INSERT OR REPLACE INTO playerStats VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        this.playerStats.forEach(stat => {
+            statsStmt.run([
+                stat.playerId,
+                stat.year,
+                stat.clubId,
+                stat.goals || 0,
+                stat.games || 0,
+                stat.isTransfer ? 1 : 0,
+                stat.fromClub || null,
+                stat.transferValue || null
+            ]);
+        });
+        statsStmt.free();
+        
+        // Salvar histórico de temporadas
+        const seasonStmt = db.prepare("INSERT OR REPLACE INTO seasonHistory VALUES (?, ?)");
+        this.seasonHistory.forEach((season, index) => {
+            seasonStmt.run([index + 1, JSON.stringify(season)]);
+        });
+        seasonStmt.free();
+        
+        // Salvar formações dos clubes
+        const formationStmt = db.prepare("INSERT OR REPLACE INTO clubFormations VALUES (?, ?)");
+        this.clubFormations.forEach((formation, clubId) => {
+            formationStmt.run([clubId, formation]);
+        });
+        formationStmt.free();
+        
+        // Salvar títulos
+        const titlesStmt = db.prepare("INSERT OR REPLACE INTO teamTitles VALUES (?, ?, ?)");
+        this.teamTitles.forEach((titleData, clubId) => {
+            if (titleData && titleData.championships) {
+                titleData.championships.forEach((count, competitionId) => {
+                    titlesStmt.run([clubId, competitionId, count]);
+                });
+            }
+        });
+        titlesStmt.free();
+        
+        // Salvar ofertas rejeitadas da temporada atual
+        if (this.rejectedOffers && this.rejectedOffers.length > 0) {
+            db.run("INSERT OR REPLACE INTO rejectedOffers VALUES (?, ?)", 
+                [this.currentSeason, JSON.stringify(this.rejectedOffers)]);
+        }
+        
+        // Salvar injeções para próxima temporada
+        const injectionStmt = db.prepare("INSERT OR REPLACE INTO nextSeasonInjections VALUES (?, ?)");
+        this.nextSeasonInjections.forEach((clubs, stageId) => {
+            const clubIds = clubs.map(c => c.id).join(',');
+            injectionStmt.run([stageId, clubIds]);
+        });
+        injectionStmt.free();
+        
+        // Exportar para arquivo
+        const binaryArray = db.export();
+        const blob = new Blob([binaryArray], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `futebol_save_t${this.currentSeason || 0}.db`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        messageDiv.innerHTML = "✅ Jogo salvo com sucesso!";
+        messageDiv.style.color = "#155724";
+        
+        setTimeout(() => {
+            messageDiv.innerHTML = "";
+        }, 3000);
+        
+    } catch (error) {
+        console.error("Erro ao salvar jogo:", error);
+        const messageDiv = document.getElementById("saveLoadMessage");
+        messageDiv.innerHTML = `❌ Erro ao salvar: ${error.message}`;
+        messageDiv.style.color = "#721c24";
+    }
+},
+
+async loadGame(file) {
+    try {
+        const messageDiv = document.getElementById("saveLoadMessage");
+        messageDiv.innerHTML = "Carregando jogo...";
+        messageDiv.style.color = "#856404";
+        
+        const reader = new FileReader();
+        
+        reader.onload = async (e) => {
+            try {
+                const arrayBuffer = e.target.result;
+                const SQL = await initSqlJs({
+                    locateFile: () => "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.wasm"
+                });
+                const db = new SQL.Database(new Uint8Array(arrayBuffer));
+                
+                // Verificar se é um save válido
+                const metaResult = db.exec("SELECT value FROM meta WHERE key = 'gameData'");
+                if (!metaResult.length) {
+                    throw new Error("Arquivo não contém dados de jogo válidos");
+                }
+                
+                const metaData = JSON.parse(metaResult[0].values[0][0]);
+                
+                // Limpar dados atuais
+                this.clubs = [];
+                this.players = [];
+                this.playerStats = [];
+                this.seasonHistory = [];
+                this.clubFormations.clear();
+                this.teamTitles.clear();
+                this.rejectedOffers = [];
+                this.nextSeasonInjections.clear();
+                
+                // Carregar clubes
+                const clubsResult = db.exec("SELECT * FROM clubs");
+                if (clubsResult.length) {
+                    clubsResult[0].values.forEach(row => {
+                        const club = {
+                            id: row[0],
+                            name: row[1],
+                            rating: row[2],
+                            countryId: row[3],
+                            bTeamOf: row[4],
+                            transferBalance: row[5],
+                            youth: row[6],
+                            originalRating: row[7],
+                            competitions: JSON.parse(row[8] || '[]'),
+                            stages: JSON.parse(row[9] || '[]'),
+                            originalCompetitions: JSON.parse(row[10] || '[]'),
+                            originalStages: JSON.parse(row[11] || '[]'),
+                            dbOriginalCompetitions: JSON.parse(row[12] || '[]'),
+                            dbOriginalStages: JSON.parse(row[13] || '[]')
+                        };
+                        this.clubs.push(club);
+                    });
+                }
+                
+                // Carregar jogadores
+                const playersResult = db.exec("SELECT * FROM players");
+                if (playersResult.length) {
+                    playersResult[0].values.forEach(row => {
+                        const player = {
+                            id: row[0],
+                            name: row[1],
+                            rating: row[2],
+                            ratingPotential: row[3],
+                            clubId: row[4],
+                            countryId: row[5],
+                            role: row[6],
+                            dob: row[7],
+                            retired: row[8] === 1,
+                            isYouth: row[9] === 1
+                        };
+                        this.players.push(player);
+                    });
+                }
+                
+                // Carregar estatísticas
+                const statsResult = db.exec("SELECT * FROM playerStats");
+                if (statsResult.length) {
+                    statsResult[0].values.forEach(row => {
+                        const stat = {
+                            playerId: row[0],
+                            year: row[1],
+                            clubId: row[2],
+                            goals: row[3],
+                            games: row[4],
+                            isTransfer: row[5] === 1,
+                            fromClub: row[6],
+                            transferValue: row[7]
+                        };
+                        this.playerStats.push(stat);
+                    });
+                }
+                
+                // Carregar histórico de temporadas
+                const seasonResult = db.exec("SELECT * FROM seasonHistory ORDER BY seasonNumber");
+                if (seasonResult.length) {
+                    seasonResult[0].values.forEach(row => {
+                        const seasonData = JSON.parse(row[1]);
+                        this.seasonHistory.push(seasonData);
+                    });
+                }
+                
+                // Carregar formações
+                const formationsResult = db.exec("SELECT * FROM clubFormations");
+                if (formationsResult.length) {
+                    formationsResult[0].values.forEach(row => {
+                        this.clubFormations.set(row[0], row[1]);
+                    });
+                }
+                
+                // Carregar títulos
+                const titlesResult = db.exec("SELECT * FROM teamTitles");
+                if (titlesResult.length) {
+                    titlesResult[0].values.forEach(row => {
+                        const clubId = row[0];
+                        const compId = row[1];
+                        const count = row[2];
+                        
+                        if (!this.teamTitles.has(clubId)) {
+                            this.teamTitles.set(clubId, { championships: new Map() });
+                        }
+                        this.teamTitles.get(clubId).championships.set(compId, count);
+                    });
+                }
+                
+                // Carregar ofertas rejeitadas
+                const rejectedResult = db.exec("SELECT * FROM rejectedOffers");
+                if (rejectedResult.length) {
+                    rejectedResult[0].values.forEach(row => {
+                        if (row[0] === this.currentSeason) {
+                            this.rejectedOffers = JSON.parse(row[1]);
+                        }
+                    });
+                }
+                
+                // Carregar injeções para próxima temporada
+                const injectionsResult = db.exec("SELECT * FROM nextSeasonInjections");
+                if (injecçõesResult && injectionsResult.length) {
+                    injectionsResult[0].values.forEach(row => {
+                        const stageId = row[0];
+                        const clubIds = row[1].split(',').filter(id => id);
+                        const clubs = clubIds.map(id => this.getClub(id)).filter(Boolean);
+                        this.nextSeasonInjections.set(stageId, clubs);
+                    });
+                }
+                
+                // Atualizar estado
+                this.currentSeason = metaData.currentSeason || 0;
+                
+                // Reconstruir maps
+                this.buildClubsMap();
+                this.buildPlayersByClubCache();
+                
+                // Atualizar UI
+                this.updateSeasonSelects();
+                
+                if (this.seasonHistory.length > 0) {
+                    const seasonSelector = document.getElementById("viewSeason");
+                    if (seasonSelector) {
+                        seasonSelector.value = this.seasonHistory.length;
+                        this.viewSeason(this.seasonHistory.length);
+                    }
+                }
+                
+                messageDiv.innerHTML = `✅ Jogo carregado! Temporada ${this.currentSeason || 0}`;
+                messageDiv.style.color = "#155724";
+                
+                setTimeout(() => {
+                    messageDiv.innerHTML = "";
+                }, 3000);
+                
+            } catch (error) {
+                console.error("Erro ao processar arquivo:", error);
+                messageDiv.innerHTML = `❌ Erro ao carregar: ${error.message}`;
+                messageDiv.style.color = "#721c24";
+            }
+        };
+        
+        reader.readAsArrayBuffer(file);
+        
+    } catch (error) {
+        console.error("Erro ao carregar jogo:", error);
+        const messageDiv = document.getElementById("saveLoadMessage");
+        messageDiv.innerHTML = `❌ Erro ao carregar: ${error.message}`;
+        messageDiv.style.color = "#721c24";
+    }
+},
     
     showTeamTrajectory(teamId) {
         const team = this.getClub(teamId);

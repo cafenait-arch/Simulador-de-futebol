@@ -20,27 +20,33 @@ const App = {
     // PERF: Poisson lookup table to avoid repeated Math.exp calls
     _poissonExpCache: new Map(),
     
+    // === WEEKLY SIMULATION STATE ===
+    seasonState: null,       // State for weekly simulation
+    seasonInProgress: false, // Whether a season is currently being simulated week by week
+    currentSeasonPreview: null, // Preview data for in-progress season viewing
+    TOTAL_WEEKS: 52,         // Minimum weeks in a season (dynamically expanded based on competition needs)
+    
 YOUTH_LAMBDA_TABLE: {
-    1: { rating: 34, potential: 3 },
-    2: { rating: 36, potential: 3 },
-    3: { rating: 38, potential: 3 },
-    4: { rating: 40, potential: 4 },
-    5: { rating: 42, potential: 5 },
-    6: { rating: 44, potential: 6 },
-    7: { rating: 46, potential: 7 },
-    8: { rating: 48, potential: 8 },
-    9: { rating: 50, potential: 9 },
-    10: { rating: 52, potential: 10 },
-    11: { rating: 54, potential: 11 },
-    12: { rating: 56, potential: 12 },
-    13: { rating: 58, potential: 13 },
-    14: { rating: 60, potential: 14 },
-    15: { rating: 62, potential: 15 },
-    16: { rating: 64, potential: 16 },
-    17: { rating: 66, potential: 17 },
-    18: { rating: 68, potential: 16 },
-    19: { rating: 70, potential: 17 },
-    20: { rating: 72, potential: 18 }
+    1: { rating: 34, potential: 5 },
+    2: { rating: 36, potential: 5 },
+    3: { rating: 38, potential: 5 },
+    4: { rating: 40, potential: 6 },
+    5: { rating: 42, potential: 7 },
+    6: { rating: 44, potential: 8 },
+    7: { rating: 46, potential: 9 },
+    8: { rating: 48, potential: 10 },
+    9: { rating: 50, potential: 11 },
+    10: { rating: 52, potential: 12 },
+    11: { rating: 54, potential: 13 },
+    12: { rating: 56, potential: 14 },
+    13: { rating: 58, potential: 15 },
+    14: { rating: 60, potential: 16 },
+    15: { rating: 62, potential: 17 },
+    16: { rating: 64, potential: 18 },
+    17: { rating: 66, potential: 19 },
+    18: { rating: 68, potential: 18 },
+    19: { rating: 70, potential: 19 },
+    20: { rating: 72, potential: 20 }
 },
     
 formations: {
@@ -59,7 +65,7 @@ formations: {
         3: { name: 'LE', category: 'defense', factor: 0.6 },
         4: { name: 'ZG', category: 'defense', factor: 0.4},
         5: { name: 'VL', category: 'midfield', factor: 0.7 },
-        6: { name: 'PE', category: 'midfield', factor: 0.9 },
+        6: { name: 'PE', category: 'attack', factor: 0.9 },
         7: { name: 'PD', category: 'attack', factor: 0.9 },
         8: { name: 'MO', category: 'midfield', factor: 0.8 },
         9: { name: 'AT', category: 'attack', factor: 1.3 }
@@ -135,7 +141,7 @@ try {
         clubId: clubId != null ? clubId.toString() : null,
         countryId: countryId != null ? countryId.toString() : null,
         role: +role,
-        dob: +dob, // Ano de nascimento
+        dob: +dob || 2000, // Ano de nascimento
         retired: false
     })).filter(p => p.id != null);
 } catch(e) { this.players = []; }
@@ -239,14 +245,16 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
         this.setupTabs();
         this.populateSelects();
         this.setupEventListeners();
+        this.setupSaveLoadListeners();
         document.getElementById("simulateNextSeasonBtn").style.display = 'block';
     },
 
     setupEventListeners() {
         [
             { id: "simulateBtn", event: "click", fn: () => this.simulate() },
-            { id: "simulateSeasonBtn", event: "click", fn: () => this.simulateSeasons() },
             { id: "simulateNextSeasonBtn", event: "click", fn: () => this.simulateNextSeason() },
+            { id: "advanceWeekBtn", event: "click", fn: () => this.advanceWeekUI() },
+            { id: "newSeasonBtn", event: "click", fn: () => this.startNewSeasonUI() },
             { id: "viewSeason", event: "change", fn: () => this.viewSeason() },
             { id: "viewCountry", event: "change", fn: () => this.onViewCountryChange() },
             { id: "viewCompetitionType", event: "change", fn: () => this.onViewCompetitionTypeChange() },
@@ -257,32 +265,10 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
             { id: "groupNext", event: "click", fn: () => this.changeGroup(1) },
             { id: "divisionUp", event: "click", fn: () => this.changeDivision(-1) },
             { id: "divisionDown", event: "click", fn: () => this.changeDivision(1) },
-    { id: "viewPlayoffBtn", event: "click", fn: () => this.togglePlayoffView() },
-    
-    { id: "saveGameBtn", event: "click", fn: () => this.saveGame() },
-    
-    {
-        id: "loadGameBtn",
-        event: "click",
-        fn: () => document.getElementById("loadGameFile").click()
+            { id: "viewPlayoffBtn", event: "click", fn: () => this.togglePlayoffView() },
+            { id: "viewTransfersBtn", event: "click", fn: () => this.toggleTransfersView() }
+        ].forEach(({ id, event, fn }) => document.getElementById(id)?.addEventListener(event, fn));
     },
-    
-    {
-        id: "loadGameFile",
-        event: "change",
-        fn: (e) => {
-            if (e.target.files.length > 0) {
-                this.loadGame(e.target.files[0]);
-                e.target.value = '';
-            }
-        }
-    },
-    
-    { id: "viewTransfersBtn", event: "click", fn: () => this.toggleTransfersView() }
-    
-].forEach(({ id, event, fn }) =>
-    document.getElementById(id)?.addEventListener(event, fn)
-)},
 
     setupTabs() {
         document.querySelectorAll(".nav-item").forEach(tab => {
@@ -1350,13 +1336,14 @@ getClubFormation(clubId) {
 },
 
 // Calcular média de ataque e defesa baseada na formação e jogadores
+// Calcular média de ataque, meio-campo e defesa baseada na formação e jogadores
 calculateFormationAverages(clubId) {
     const clubPlayers = this.players.filter(p => p.clubId === clubId && !p.retired);
     const formationKey = this.getClubFormation(clubId);
     const formation = this.formations[formationKey];
     
     if (!formation || clubPlayers.length === 0) {
-        return { attack: 0, defense: 0, formation: formationKey };
+        return { attack: 0, midfield: 0, defense: 0, formation: formationKey };
     }
     
     // Simula a escalação para obter médias
@@ -1391,10 +1378,15 @@ calculateFormationAverages(clubId) {
         }
     });
     
-    // Calcular médias de ataque e defesa
+    // Calcular médias por categoria
     const attackPlayers = lineup.filter(p => {
         const roleInfo = this.roleMap[p.lineupRole];
         return roleInfo && roleInfo.category === 'attack';
+    });
+    
+    const midfieldPlayers = lineup.filter(p => {
+        const roleInfo = this.roleMap[p.lineupRole];
+        return roleInfo && roleInfo.category === 'midfield';
     });
     
     const defensePlayers = lineup.filter(p => {
@@ -1402,18 +1394,23 @@ calculateFormationAverages(clubId) {
         return roleInfo && (roleInfo.category === 'defense' || roleInfo.category === 'goalkeeper');
     });
     
-    const attackAvg = attackPlayers.length > 0 
-        ? attackPlayers.reduce((sum, p) => sum + p.rating, 0) / attackPlayers.length 
-        : 0;
+    const attackAvg = attackPlayers.length > 0 ?
+        attackPlayers.reduce((sum, p) => sum + p.rating, 0) / attackPlayers.length :
+        50;
     
-    const defenseAvg = defensePlayers.length > 0 
-        ? defensePlayers.reduce((sum, p) => sum + p.rating, 0) / defensePlayers.length 
-        : 0;
+    const midfieldAvg = midfieldPlayers.length > 0 ?
+        midfieldPlayers.reduce((sum, p) => sum + p.rating, 0) / midfieldPlayers.length :
+        50;
     
-    return { 
-        attack: Math.round(attackAvg * 10) / 10, 
-        defense: Math.round(defenseAvg * 10) / 10, 
-        formation: formationKey 
+    const defenseAvg = defensePlayers.length > 0 ?
+        defensePlayers.reduce((sum, p) => sum + p.rating, 0) / defensePlayers.length :
+        50;
+    
+    return {
+        attack: Math.round(attackAvg * 10) / 10,
+        midfield: Math.round(midfieldAvg * 10) / 10,
+        defense: Math.round(defenseAvg * 10) / 10,
+        formation: formationKey
     };
 },
 
@@ -1602,7 +1599,8 @@ generateYouthPlayer(clubId) {
         role,
         dob,
         retired: false,
-        isYouth: true
+        isYouth: true,
+        _generated: true
     });
 },
 
@@ -1661,7 +1659,8 @@ generateFicticiousPlayers(clubId, count) {
             countryId: playerCountryId,
             role,
             dob,
-            retired: false
+            retired: false,
+            _generated: true
         });
     }
 },
@@ -2675,7 +2674,6 @@ distributeAwards(stageId, standings) {
         });
         
         if (allCompetitions.length === 0) {
-            alert("Nenhuma competição encontrada.");
             return null;
         }
         
@@ -2752,7 +2750,6 @@ distributeAwards(stageId, standings) {
         }
         
         if (seasonResult.competitions.length === 0) {
-            alert("Nenhuma competição pôde ser simulada.");
             return null;
         }
         
@@ -3184,7 +3181,6 @@ resetContinentalQualifications() {
         const homeClub = this.getClub(homeId);
         const awayClub = this.getClub(awayId);
         if (!homeClub || !awayClub) {
-            alert("Times não encontrados.");
             return;
         }
         
@@ -3232,160 +3228,1004 @@ resetContinentalQualifications() {
         `;
     },
 
-    async simulateSeasons() {
-        const button = document.getElementById("simulateSeasonBtn"); 
-        if (button.disabled) return;
+    // =========================================================
+    // WEEKLY SIMULATION SYSTEM
+    // =========================================================
+
+    getSeasonWindow(type) {
+        switch (type) {
+            case 5: return { start: 1, end: 13 };    // Estadual
+            case 4: return { start: 2, end: 3 };      // Supercopa
+            case 2: return { start: 9, end: 38 };     // Campeonato Nacional
+            case 3: return { start: 10, end: 38 };    // Copa Nacional
+            case 0: return { start: 12, end: 38 };    // Continental
+            case 1: return { start: 39, end: 42 };    // Intercontinental
+            default: return { start: 1, end: 42 };
+        }
+    },
+
+    initializeWeeklySeason() {
+        this.invalidatePlayerCache();
+        this.processYouthUpgrades();
+        this.revealYouthPlayers();
         
-        button.disabled = true;
-        const originalText = button.textContent;
-        
-        try {
-            this.initializeTitles();
-            this.clubFormations = new Map(); // Resetar formações
-            this.playerStatsCache = null; // Resetar cache de stats
-            this.currentStatsYear = 0;
-            this.nextSeasonInjections = new Map();
-            this.rejectedOffers = [];
-            this.clubs.forEach(club => { 
-                club.rating = club.originalRating; 
-                club.competitions = [...club.dbOriginalCompetitions];
-                club.stages = [...club.dbOriginalStages];
-                club.originalCompetitions = [...club.dbOriginalCompetitions];
-                club.originalStages = [...club.dbOriginalStages];
+        this.clubs.forEach(club => {
+            const clubPlayers = this.players.filter(p => p.clubId === club.id && !p.retired);
+            if (clubPlayers.length < 20) {
+                this.generateFicticiousPlayers(club.id, 20 - clubPlayers.length);
+            }
+        });
+        this.invalidatePlayerCache();
+
+        const allCompetitions = [...this.competitions].sort((a, b) => {
+            if (a.countryId !== b.countryId) return a.countryId.localeCompare(b.countryId);
+            return a.importanceOrder - b.importanceOrder;
+        });
+
+        if (allCompetitions.length === 0) {
+            return null;
+        }
+
+        const seasonResult = {
+            season: this.seasonHistory.length + 1,
+            competitions: [],
+            year: new Date().getFullYear() + this.seasonHistory.length
+        };
+
+        // Build competition → stages mapping
+        const competitionStagesMap = new Map();
+        allCompetitions.forEach(comp => {
+            const stages = this.competitionStages.filter(s => {
+                const compIds = s.competitionId.split(',').map(id => id.trim());
+                return compIds.includes(comp.id);
+            }).sort((a, b) => a.startingWeek - b.startingWeek || Number(a.id) - Number(b.id));
+            competitionStagesMap.set(comp.id, stages);
+        });
+
+        // State tracking
+        const stageSchedules = new Map();  // stageId → { stage, teams, schedule, standings, groups, playoffData, clubsStats, clubsStatsMap, roundsPlayed, totalRounds, type, competitionId }
+        const stageWindows = new Map();    // stageId → { weekStart, weekEnd }
+        const weeklyPlan = Array.from({ length: this.TOTAL_WEEKS + 1 }, () => []);
+        const completedStages = new Set();
+        const qualifiedTeams = new Map();
+        const crossQualified = new Map();
+        const sharedStageResults = new Map();
+        const stageStatus = new Map();     // stageId → 'pending' | 'ready' | 'active' | 'completed'
+        const competitionResults = new Map(); // competitionId → { competition, stages: [], championId }
+
+        // Initialize competition results
+        allCompetitions.forEach(comp => {
+            competitionResults.set(comp.id, {
+                competition: comp,
+                stages: [],
+                championId: null,
+                type: comp.type
             });
+        });
+
+        // Inject nextSeasonInjections
+        if (this.nextSeasonInjections.size > 0) {
+            this.nextSeasonInjections.forEach((clubs, stageId) => {
+                if (!crossQualified.has(stageId)) crossQualified.set(stageId, []);
+                const list = crossQualified.get(stageId);
+                clubs.forEach(club => {
+                    if (!list.find(c => c.id === club.id)) list.push(club);
+                });
+            });
+            this.nextSeasonInjections = new Map();
+        }
+
+        // Assign windows and prepare initial stages
+        const processedStages = new Set();
+        
+        allCompetitions.forEach(comp => {
+            const window = this.getSeasonWindow(comp.type);
+            const stages = competitionStagesMap.get(comp.id) || [];
             
-            const numSeasons = parseInt(document.getElementById("numSeasons").value); 
-            if (numSeasons < 1 || numSeasons > 1000) {
-                alert("Número de temporadas inválido. Use entre 1 e 1000.");
-                return;
-            }
-            
-            this.seasonHistory = []; 
-            this.currentSeason = 0;
-            
-            const progressContainer = document.getElementById("seasonProgress") || (() => { 
-                const div = document.createElement("div"); 
-                div.id = "seasonProgress"; 
-                div.style.padding = "10px";
-                div.style.backgroundColor = "#f0f0f0";
-                div.style.marginBottom = "10px";
-                div.style.borderRadius = "5px";
-                div.style.textAlign = "center";
-                div.style.fontWeight = "bold";
-                document.getElementById("season").prepend(div); 
-                return div; 
-            })();
-            
-            for (let season = 1; season <= numSeasons; season++) {
-                this.currentSeason = season; 
-                button.textContent = `Simulando... (${season}/${numSeasons})`;
-                
-                const seasonResult = await this.simulateSingleSeason();
-                if (!seasonResult) {
-                    alert(`Erro ao simular temporada ${season}. Parando simulação.`);
-                    break;
+            if (stages.length === 0) return;
+
+            // Distribute stages within the competition window
+            const totalStages = stages.length;
+            const windowSize = window.end - window.start + 1;
+
+            stages.forEach((stage, idx) => {
+                if (processedStages.has(stage.id)) {
+                    // Stage shared with another competition - already processed
+                    return;
                 }
-                
-                const percent = ((season / numSeasons) * 100).toFixed(1); 
-                progressContainer.textContent = `Temporada ${season}/${numSeasons} completa — ${percent}%`;
-                progressContainer.style.backgroundColor = season % 2 === 0 ? "#e8f5e8" : "#f0f0f0";
-                
-                await new Promise(r => setTimeout(r, 10));
+                processedStages.add(stage.id);
+
+                // Calculate this stage's window within the competition window
+                const stageStart = window.start + Math.floor(idx * windowSize / totalStages);
+                const stageEnd = window.start + Math.floor((idx + 1) * windowSize / totalStages) - 1;
+                stageWindows.set(stage.id, { weekStart: Math.max(1, stageStart), weekEnd: Math.max(stageStart + 1, stageEnd) });
+
+                // Check if this stage has initial teams
+                const assignedTeams = this.clubs.filter(club =>
+                    club.stages.includes(stage.id) && club.originalStages.includes(stage.id)
+                );
+                const extraTeams = crossQualified.get(stage.id) || [];
+
+                if (assignedTeams.length > 0 || extraTeams.length > 0) {
+                    // Combine all team sources
+                    const unique = new Map();
+                    [...assignedTeams, ...extraTeams].forEach(t => {
+                        if (t && !unique.has(t.id)) unique.set(t.id, t);
+                    });
+                    const teams = Array.from(unique.values());
+
+                    // Handle Supercopa fix
+                    if (comp.type === 4 && teams.length < 2 && teams.length > 0) {
+                        const sameCountryChamp = this.competitions.find(c => c.type === 2 && c.countryId === comp.countryId);
+                        if (sameCountryChamp) {
+                            const champStages = (competitionStagesMap.get(sameCountryChamp.id) || [])
+                                .sort((a, b) => b.startingWeek - a.startingWeek);
+                            const lastChampStage = champStages.find(s => s.isWinnerDecisionStage) || champStages[0];
+                            if (lastChampStage && sharedStageResults.has(lastChampStage.id)) {
+                                const champResult = sharedStageResults.get(lastChampStage.id);
+                                const secondPlace = champResult.standings?.[1];
+                                if (secondPlace) {
+                                    const club = this.getClub(secondPlace.id);
+                                    if (club && !teams.find(t => t.id === club.id)) teams.push(club);
+                                }
+                            }
+                        }
+                    }
+
+                    if (teams.length >= 2) {
+                        this.prepareStageSchedule(stage, teams, stageSchedules);
+                        stageStatus.set(stage.id, 'ready');
+                        this.distributeStageRounds(stage.id, stageSchedules, stageWindows, weeklyPlan);
+                    } else {
+                        stageStatus.set(stage.id, 'pending');
+                    }
+                } else {
+                    stageStatus.set(stage.id, 'pending');
+                }
+            });
+        });
+
+        // Calculate actual TOTAL_WEEKS based on stage windows (dynamically expanded)
+        let actualTotalWeeks = this.TOTAL_WEEKS;
+        stageWindows.forEach(w => {
+            if (w.weekEnd > actualTotalWeeks) actualTotalWeeks = w.weekEnd;
+        });
+        // Ensure weeklyPlan is large enough
+        while (weeklyPlan.length <= actualTotalWeeks) {
+            weeklyPlan.push([]);
+        }
+
+        this.seasonState = {
+            currentWeek: 0,
+            totalWeeks: actualTotalWeeks,
+            stageSchedules,
+            stageWindows,
+            weeklyPlan,
+            completedStages,
+            qualifiedTeams,
+            crossQualified,
+            sharedStageResults,
+            stageStatus,
+            competitionResults,
+            competitionStagesMap,
+            allCompetitions,
+            seasonResult,
+            seasonComplete: false
+        };
+
+        this.seasonInProgress = true;
+        return this.seasonState;
+    },
+
+    prepareStageSchedule(stage, teams, stageSchedules) {
+        const clubsStats = teams.map(team => ({
+            id: team.id,
+            currentRating: team.rating,
+            expectedGoalsFor: 0, expectedGoalsAgainst: 0,
+            actualGoalsFor: 0, actualGoalsAgainst: 0,
+            goals: 0, assists: 0, cleanSheets: 0
+        }));
+        const clubsStatsMap = new Map(clubsStats.map(s => [s.id, s]));
+
+        const data = {
+            stage, teams, clubsStats, clubsStatsMap,
+            standings: [], schedule: [], groups: [],
+            playoffBracket: [], playoffData: null,
+            roundsPlayed: 0, totalRounds: 0, type: 'league'
+        };
+
+        if (stage.stageType === 1) {
+            // Playoff - generate matchups
+            const numLegs = stage.numLegs || 1;
+            const allTeams = teams.filter(t => t && t.id).map(t => ({ ...t }));
+            const shuffled = [...allTeams].sort(() => Math.random() - 0.5);
+            if (shuffled.length % 2 !== 0) shuffled.pop();
+
+            data.type = 'playoff';
+            data.playoffMatchups = [];
+            for (let i = 0; i < shuffled.length; i += 2) {
+                data.playoffMatchups.push({ team1: shuffled[i], team2: shuffled[i + 1], numLegs });
             }
-            
-            this.updateSeasonSelects();
-            if (this.seasonHistory.length > 0) {
-                const seasonSelector = document.getElementById("viewSeason"); 
-                seasonSelector.value = this.seasonHistory.length; 
-                this.viewSeason(this.seasonHistory.length);
+            data.totalRounds = 1;
+        } else if (stage.stageType === 2) {
+            // Pot League
+            data.schedule = this.generatePotLeagueSchedule(teams);
+            data.totalRounds = data.schedule.length;
+            data.type = 'potLeague';
+        } else if (stage.stageType === 3) {
+            // Cross-group
+            data.type = 'crossGroup';
+            const numGroups = stage.numGroups ?? 2;
+            const shuffled = [...teams];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
             }
+            const groups = Array.from({ length: numGroups }, (_, i) => ({
+                id: String.fromCharCode(65 + i), teams: []
+            }));
+            shuffled.forEach((t, i) => groups[i % numGroups].teams.push(t));
             
-            progressContainer.textContent = `✅ Simulação concluída - ${this.seasonHistory.length} temporadas simuladas`;
-            progressContainer.style.backgroundColor = "#d4edda";
-            progressContainer.style.color = "#155724";
+            const teamGroup = new Map();
+            groups.forEach(g => g.teams.forEach(t => teamGroup.set(t.id, g.id)));
             
-        } catch (error) {
-            console.error("Erro na simulação:", error);
-            alert(`Erro durante a simulação: ${error.message}`);
-        } finally { 
-            button.disabled = false; 
-            button.textContent = originalText;
+            // Generate cross-group schedule
+            const schedule = [];
+            let globalRound = 1;
+            for (let g1 = 0; g1 < groups.length; g1++) {
+                for (let g2 = g1 + 1; g2 < groups.length; g2++) {
+                    let A = groups[g1].teams.map(t => t.id);
+                    let B = groups[g2].teams.map(t => t.id);
+                    const maxLen = Math.max(A.length, B.length);
+                    while (A.length < maxLen) A.push(null);
+                    while (B.length < maxLen) B.push(null);
+                    let rotA = [...A], rotB = [...B];
+                    for (let r = 0; r < maxLen; r++) {
+                        const roundMatches = [];
+                        const invertHome = r % 2 === 1;
+                        for (let i = 0; i < maxLen; i++) {
+                            const a = rotA[i], b = rotB[i];
+                            if (!a || !b) continue;
+                            const home = invertHome ? b : a;
+                            const away = invertHome ? a : b;
+                            roundMatches.push({
+                                home, away, homeScore: 0, awayScore: 0, played: false,
+                                round: globalRound,
+                                homeGroup: teamGroup.get(home), awayGroup: teamGroup.get(away)
+                            });
+                        }
+                        schedule.push(roundMatches);
+                        globalRound++;
+                        rotA = [rotA[0], ...rotA.slice(2), rotA[1]];
+                        rotB = [rotB[rotB.length - 1], ...rotB.slice(0, rotB.length - 1)];
+                    }
+                }
+            }
+            data.schedule = schedule;
+            data.groups = groups;
+            data.teamGroup = teamGroup;
+            data.totalRounds = schedule.length;
+        } else if (stage.numGroups > 1) {
+            // Regular groups
+            data.type = 'group';
+            const numGroups = stage.numGroups || 1;
+            const numRounds = stage.numRounds || 2;
+            const shuffledTeams = [...teams].sort(() => Math.random() - 0.5);
+            const baseSize = Math.floor(shuffledTeams.length / numGroups);
+            const remainder = shuffledTeams.length % numGroups;
+            let startIndex = 0;
+            const groups = [];
+            let maxRounds = 0;
+
+            for (let g = 0; g < numGroups; g++) {
+                const groupSize = baseSize + (g < remainder ? 1 : 0);
+                const groupTeams = shuffledTeams.slice(startIndex, startIndex + groupSize);
+                startIndex += groupSize;
+                if (groupTeams.length < 2) continue;
+                const groupSchedule = this.generateLeagueSchedule(groupTeams, numRounds);
+                if (groupSchedule.length > maxRounds) maxRounds = groupSchedule.length;
+                groups.push({
+                    id: String.fromCharCode(65 + g),
+                    teams: groupTeams,
+                    standings: [],
+                    schedule: groupSchedule
+                });
+            }
+            data.groups = groups;
+            data.totalRounds = maxRounds;
+        } else {
+            // Regular league
+            data.schedule = this.generateLeagueSchedule(teams, stage.numRounds || 2);
+            data.totalRounds = data.schedule.length;
+            data.type = 'league';
+        }
+
+        stageSchedules.set(stage.id, data);
+    },
+
+    distributeStageRounds(stageId, stageSchedules, stageWindows, weeklyPlan) {
+        const data = stageSchedules.get(stageId);
+        const window = stageWindows.get(stageId);
+        if (!data || !window) return;
+
+        const totalRounds = data.totalRounds;
+        if (totalRounds === 0) return;
+
+        // Ensure window is large enough: 1 round per week minimum
+        const currentSize = window.weekEnd - window.weekStart + 1;
+        if (totalRounds > currentSize) {
+            window.weekEnd = window.weekStart + totalRounds - 1;
+        }
+        const windowSize = window.weekEnd - window.weekStart + 1;
+
+        // Grow weeklyPlan if needed
+        while (weeklyPlan.length <= window.weekEnd) {
+            weeklyPlan.push([]);
+        }
+
+        for (let r = 0; r < totalRounds; r++) {
+            const week = window.weekStart + Math.floor(r * windowSize / totalRounds);
+            weeklyPlan[week].push({ stageId, roundIndex: r });
+        }
+    },
+
+    playWeekMatches(week) {
+        const state = this.seasonState;
+        const tasks = state.weeklyPlan[week] || [];
+
+        for (const { stageId, roundIndex } of tasks) {
+            const data = state.stageSchedules.get(stageId);
+            if (!data || state.completedStages.has(stageId)) continue;
+            if (roundIndex < data.roundsPlayed) continue; // Already played
+
+            // Initialize standings if first round
+            if (data.roundsPlayed === 0) {
+                if (data.type === 'league' || data.type === 'potLeague') {
+                    this.initializeStandings(data.teams);
+                    data.standingsRef = this.standings;
+                    data.standingsMapRef = this.standingsMap;
+                } else if (data.type === 'group') {
+                    data.groups.forEach(g => {
+                        this.initializeStandings(g.teams);
+                        g.standingsRef = this.standings;
+                        g.standingsMapRef = this.standingsMap;
+                    });
+                } else if (data.type === 'crossGroup') {
+                    this.initializeStandings(data.teams);
+                    data.standingsRef = this.standings;
+                    data.standingsMapRef = this.standingsMap;
+                }
+            }
+
+            if (data.type === 'playoff') {
+                // Play all playoff matches at once
+                const playoffResult = this.simulatePlayoff(data.teams, data.stage);
+                data.playoffBracket = playoffResult.bracket;
+                data.playoffData = playoffResult;
+                data.standings = this.getPlayoffTeamsInOrder(playoffResult.bracket, playoffResult.winners);
+                data.roundsPlayed = data.totalRounds;
+            } else if (data.type === 'league' || data.type === 'potLeague') {
+                this.standings = data.standingsRef;
+                this.standingsMap = data.standingsMapRef;
+                const roundMatches = data.schedule[roundIndex];
+                if (roundMatches) {
+                    for (const match of roundMatches) {
+                        this.playMatch(match, data.clubsStats, data.clubsStatsMap);
+                    }
+                }
+                data.roundsPlayed = roundIndex + 1;
+                this.sortStandings();
+                data.standings = JSON.parse(JSON.stringify(this.standings));
+            } else if (data.type === 'group') {
+                data.groups.forEach(group => {
+                    this.standings = group.standingsRef;
+                    this.standingsMap = group.standingsMapRef;
+                    const roundMatches = group.schedule[roundIndex];
+                    if (roundMatches) {
+                        for (const match of roundMatches) {
+                            this.playMatch(match, data.clubsStats, data.clubsStatsMap);
+                        }
+                    }
+                    this.sortStandings();
+                    group.standings = JSON.parse(JSON.stringify(this.standings));
+                });
+                data.roundsPlayed = roundIndex + 1;
+                data.standings = this.consolidateGroupStandings(data.groups);
+            } else if (data.type === 'crossGroup') {
+                this.standings = data.standingsRef;
+                this.standingsMap = data.standingsMapRef;
+                const roundMatches = data.schedule[roundIndex];
+                if (roundMatches) {
+                    for (const match of roundMatches) {
+                        this.playMatch(match, data.clubsStats, data.clubsStatsMap);
+                    }
+                }
+                data.roundsPlayed = roundIndex + 1;
+                this.sortStandings();
+                const finalStandings = JSON.parse(JSON.stringify(this.standings));
+                data.standings = finalStandings;
+                // Update group standings
+                data.groups.forEach(g => {
+                    g.standings = finalStandings.filter(s => g.teams.some(t => t.id === s.id));
+                    g.schedule = data.schedule.map(r => r.filter(m => g.teams.some(t => t.id === m.home || t.id === m.away)));
+                    g.isCrossGroup = true;
+                });
+            }
+        }
+    },
+
+    checkAndCompleteStages() {
+        const state = this.seasonState;
+        
+        state.stageSchedules.forEach((data, stageId) => {
+            if (state.completedStages.has(stageId)) return;
+            if (data.roundsPlayed < data.totalRounds) return;
+
+            // Stage complete!
+            state.completedStages.add(stageId);
+
+            // Build stageResult compatible with existing code
+            const stageResult = {
+                stage: data.stage,
+                standings: data.standings || [],
+                schedule: data.schedule || [],
+                playoffBracket: data.playoffBracket || [],
+                groups: data.groups || [],
+                clubsStats: data.clubsStats || []
+            };
+
+            state.sharedStageResults.set(stageId, stageResult);
+
+            // Update ratings
+            this.updateRatingsFromStats(data.clubsStats);
+
+            // Distribute awards
+            if (stageResult.standings && stageResult.standings.length > 0) {
+                this.distributeAwards(stageId, stageResult.standings);
+            }
+
+            // Add to competition results
+            const stageCompIds = data.stage.competitionId.split(',').map(id => id.trim());
+            stageCompIds.forEach(compId => {
+                const compResult = state.competitionResults.get(compId);
+                if (compResult) {
+                    compResult.stages.push(stageResult);
+                    
+                    // Check for champion
+                    if (data.stage.isWinnerDecisionStage) {
+                        if (data.stage.stageType === 0 || data.stage.stageType === 2 || data.stage.stageType === 3) {
+                            compResult.championId = stageResult.standings?.[0]?.id || null;
+                        } else if (data.stage.stageType === 1 && stageResult.playoffBracket?.length > 0) {
+                            const finalRound = stageResult.playoffBracket[stageResult.playoffBracket.length - 1];
+                            if (finalRound?.matches?.length > 0) {
+                                compResult.championId = finalRound.matches[0].winner?.id || null;
+                            }
+                        }
+                        if (compResult.championId) {
+                            this.addChampionship(compResult.championId, compId);
+                        }
+                    }
+                }
+            });
+
+            // Process transitions
+            const transitions = this.competitionStageTransitions.filter(t => t.stageIdFrom === stageId);
+            
+            for (const transition of transitions) {
+                let teamsToTransfer = [];
+                const teams = data.teams || [];
+
+                if (transition.place === -1) {
+                    teamsToTransfer = teams.map(t => this.getClub(t.id)).filter(Boolean);
+                } else {
+                    teamsToTransfer = this.getTeamsByPosition(
+                        data.stage, transition.place, stageResult.standings,
+                        stageResult.groups, stageResult.playoffBracket
+                    ).map(t => this.getClub(t.id)).filter(Boolean);
+                }
+
+                if (teamsToTransfer.length > 0) {
+                    if (!state.qualifiedTeams.has(transition.stageIdTo)) {
+                        state.qualifiedTeams.set(transition.stageIdTo, []);
+                    }
+                    const currentTeams = state.qualifiedTeams.get(transition.stageIdTo);
+                    teamsToTransfer.forEach(team => {
+                        if (!currentTeams.find(t => t.id === team.id)) {
+                            currentTeams.push(team);
+                        }
+                    });
+
+                    // Type 106: cross-competition qualification (same season)
+                    if (transition.type === 106) {
+                        const targetStage = this.competitionStages.find(s => s.id === transition.stageIdTo);
+                        if (targetStage) {
+                            const targetCompIds = targetStage.competitionId.split(',').map(id => id.trim());
+                            const isDifferent = !stageCompIds.some(id => targetCompIds.includes(id));
+                            if (isDifferent) {
+                                if (!state.crossQualified.has(transition.stageIdTo)) {
+                                    state.crossQualified.set(transition.stageIdTo, []);
+                                }
+                                const globalList = state.crossQualified.get(transition.stageIdTo);
+                                teamsToTransfer.forEach(team => {
+                                    if (!globalList.find(t => t.id === team.id)) globalList.push(team);
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    },
+
+    activatePendingStages() {
+        const state = this.seasonState;
+        let activated = false;
+
+        state.stageStatus.forEach((status, stageId) => {
+            if (status !== 'pending') return;
+            if (state.completedStages.has(stageId)) return;
+            if (state.stageSchedules.has(stageId)) return;
+
+            // Check if teams are now available
+            const stage = this.competitionStages.find(s => s.id === stageId);
+            if (!stage) return;
+const incomingTransitions = this.competitionStageTransitions.filter(t => t.stageIdTo === stageId);
+const hasUncompletedFeeders = incomingTransitions.some(t => !state.completedStages.has(t.stageIdFrom));
+if (hasUncompletedFeeders) return;
+
+
+            const assignedTeams = this.clubs.filter(club =>
+                club.stages.includes(stage.id) && club.originalStages.includes(stage.id)
+            );
+            const qualifiedFromTransitions = state.qualifiedTeams.get(stageId) || [];
+            const extraTeams = state.crossQualified.get(stageId) || [];
+
+            const unique = new Map();
+            [...assignedTeams, ...qualifiedFromTransitions, ...extraTeams].forEach(t => {
+                if (t && !unique.has(t.id)) unique.set(t.id, t);
+            });
+            const teams = Array.from(unique.values());
+
+            if (teams.length >= 2) {
+                // Handle Supercopa fix
+                const stageCompIds = stage.competitionId.split(',').map(id => id.trim());
+                stageCompIds.forEach(compId => {
+                    const comp = this.competitions.find(c => c.id === compId);
+                    if (comp && comp.type === 4 && teams.length < 2) {
+                        const sameCountryChamp = this.competitions.find(c => c.type === 2 && c.countryId === comp.countryId);
+                        if (sameCountryChamp) {
+                            const champStages = (state.competitionStagesMap.get(sameCountryChamp.id) || [])
+                                .sort((a, b) => b.startingWeek - a.startingWeek);
+                            const lastChampStage = champStages.find(s => s.isWinnerDecisionStage) || champStages[0];
+                            if (lastChampStage && state.sharedStageResults.has(lastChampStage.id)) {
+                                const champResult = state.sharedStageResults.get(lastChampStage.id);
+                                const secondPlace = champResult.standings?.[1];
+                                if (secondPlace) {
+                                    const club = this.getClub(secondPlace.id);
+                                    if (club && !teams.find(t => t.id === club.id)) teams.push(club);
+                                }
+                            }
+                        }
+                    }
+                });
+
+                if (teams.length >= 2) {
+                    this.prepareStageSchedule(stage, teams, state.stageSchedules);
+                    state.stageStatus.set(stageId, 'ready');
+                    
+                    // Assign to remaining weeks
+                    const window = state.stageWindows.get(stageId);
+                    if (window) {
+                        // Adjust window start to current week if we're past it
+                        const adjustedStart = Math.max(window.weekStart, state.currentWeek + 1);
+                        const adjustedWindow = { ...window, weekStart: adjustedStart };
+                        state.stageWindows.set(stageId, adjustedWindow);
+                    }
+                    this.distributeStageRounds(stageId, state.stageSchedules, state.stageWindows, state.weeklyPlan);
+                    // Update totalWeeks if this stage expanded beyond current limit
+                    const newWindow = state.stageWindows.get(stageId);
+                    if (newWindow && newWindow.weekEnd > state.totalWeeks) {
+                        state.totalWeeks = newWindow.weekEnd;
+                        while (state.weeklyPlan.length <= state.totalWeeks) {
+                            state.weeklyPlan.push([]);
+                        }
+                    }
+                    activated = true;
+                }
+            }
+        });
+
+        return activated;
+    },
+
+    finalizeSeasonWeekly() {
+        const state = this.seasonState;
+
+        // Build season result
+        const seasonResult = state.seasonResult;
+        state.competitionResults.forEach((compResult, compId) => {
+            if (compResult.stages.length > 0) {
+                seasonResult.competitions.push(compResult);
+            }
+        });
+
+        if (seasonResult.competitions.length === 0) {
+            return null;
+        }
+
+        // End-of-season processing
+        this.resetContinentalQualifications();
+        this.applyPromotionsAndRelegationsAllCountries(seasonResult);
+        this.evolvePlayersEndOfSeason();
+        this.runTransferWindow();
+        this.invalidatePlayerCache();
+
+        seasonResult.transfers = this.getTransferReport();
+        seasonResult.rejectedOffers = this.getRejectedOffersReport();
+
+        this.seasonHistory.push(seasonResult);
+        document.getElementById('saveProgressBtn').style.display = 'inline-block';
+        this.seasonInProgress = false;
+        state.seasonComplete = true;
+
+        return seasonResult;
+    },
+
+    updateWeekUI() {
+        const state = this.seasonState;
+        if (!state) return;
+
+        const weekIndicator = document.getElementById('weekIndicator');
+        if (weekIndicator) weekIndicator.style.display = 'block';
+
+        const weekLabel = document.getElementById('weekLabel');
+        if (weekLabel) weekLabel.textContent = `Semana ${state.currentWeek} / ${state.totalWeeks}`;
+
+        const weekFill = document.getElementById('weekFill');
+        if (weekFill) weekFill.style.width = `${(state.currentWeek / state.totalWeeks) * 100}%`;
+
+        const weekStatus = document.getElementById('weekStatus');
+        if (weekStatus) {
+            const active = Array.from(state.stageStatus.values()).filter(s => s === 'ready').length;
+            const completed = state.completedStages.size;
+            weekStatus.textContent = `${completed} concluídas`;
+        }
+
+        // Show/hide buttons
+        const advanceBtn = document.getElementById('advanceWeekBtn');
+        const newSeasonBtn = document.getElementById('newSeasonBtn');
+        const continueBtn = document.getElementById('simulateNextSeasonBtn');
+
+        if (state.seasonComplete) {
+            if (newSeasonBtn) newSeasonBtn.style.display = 'inline-block';
+            if (continueBtn) continueBtn.style.display = 'inline-block';
+        } else if (this.seasonInProgress) {
+            if (advanceBtn) advanceBtn.style.display = 'inline-block';
+            if (newSeasonBtn) newSeasonBtn.style.display = 'none';
+        }
+    },
+
+    buildCurrentSeasonPreview() {
+        const state = this.seasonState;
+        if (!state) return null;
+
+        const preview = {
+            season: this.seasonHistory.length + 1,
+            competitions: [],
+            year: state.seasonResult.year,
+            isPreview: true
+        };
+
+        // Add completed stages from competitionResults
+        const addedStageIds = new Set();
+        state.competitionResults.forEach((compResult, compId) => {
+            if (compResult.stages.length > 0) {
+                const cloned = {
+                    competition: compResult.competition,
+                    stages: [...compResult.stages],
+                    championId: compResult.championId,
+                    type: compResult.type
+                };
+                compResult.stages.forEach(s => addedStageIds.add(s.stage.id));
+                preview.competitions.push(cloned);
+            }
+        });
+
+        // Add in-progress stages (not yet completed but have rounds played)
+        state.stageSchedules.forEach((data, stageId) => {
+            if (addedStageIds.has(stageId)) return;
+            if (data.roundsPlayed === 0) return;
+
+            const partialResult = {
+                stage: data.stage,
+                standings: data.standings || [],
+                schedule: data.schedule || [],
+                playoffBracket: data.playoffBracket || [],
+                groups: data.groups || [],
+                clubsStats: data.clubsStats || []
+            };
+
+            const stageCompIds = data.stage.competitionId.split(',').map(id => id.trim());
+            stageCompIds.forEach(compId => {
+                let compEntry = preview.competitions.find(c => c.competition.id === compId);
+                if (!compEntry) {
+                    const comp = state.allCompetitions.find(c => c.id === compId);
+                    if (comp) {
+                        compEntry = {
+                            competition: comp,
+                            stages: [],
+                            championId: null,
+                            type: comp.type
+                        };
+                        preview.competitions.push(compEntry);
+                    }
+                }
+                if (compEntry && !compEntry.stages.find(s => s.stage.id === stageId)) {
+                    compEntry.stages.push(partialResult);
+                }
+            });
+        });
+
+        return preview;
+    },
+
+    async advanceWeekUI() {
+        const button = document.getElementById("advanceWeekBtn");
+
+        try {
+            // Initialize season if not started
+            if (!this.seasonInProgress || !this.seasonState) {
+                this.currentSeason = this.seasonHistory.length + 1;
+                this.initializeWeeklySeason();
+                this.updateWeekUI();
+            }
+
+            const state = this.seasonState;
+            if (state.seasonComplete) return;
+
+            state.currentWeek++;
+
+            // Play matches for this week
+            this.playWeekMatches(state.currentWeek);
+
+            // Check for completed stages
+            this.checkAndCompleteStages();
+
+            // Try to activate pending stages
+            this.activatePendingStages();
+
+            this.updateWeekUI();
+
+            // Show progress
+            const progressContainer = document.getElementById("seasonProgress");
+            if (progressContainer) {
+                const tasks = state.weeklyPlan[state.currentWeek] || [];
+                const stageNames = [...new Set(tasks.map(t => {
+                    const d = state.stageSchedules.get(t.stageId);
+                    return d?.stage?.name || '';
+                }).filter(Boolean))];
+                
+                progressContainer.innerHTML = `<span style="color:#4fc3f7;font-weight:600;">Semana ${state.currentWeek}: ${stageNames.length > 0 ? stageNames.join(', ') : 'Sem jogos'}</span>`;
+                progressContainer.style.display = 'block';
+            }
+
+            // Build preview and show Visualizar Resultados section (wrapped in try-catch to never break season flow)
+            try {
+                const preview = this.buildCurrentSeasonPreview();
+                if (preview && preview.competitions.length > 0) {
+                    this.currentSeasonPreview = preview;
+                    this.updateSeasonSelectsWithPreview();
+                    const seasonSelector = document.getElementById("viewSeason");
+                    if (seasonSelector) {
+                        seasonSelector.value = 'current';
+                        this.viewSeason('current');
+                    }
+                }
+            } catch (previewErr) {
+            }
+
+            // Check if season is over
+            if (state.currentWeek >= state.totalWeeks) {
+                // Check if there are still unplayed rounds
+                let hasUnplayed = false;
+                state.stageSchedules.forEach((data, stageId) => {
+                    if (!state.completedStages.has(stageId) && data.roundsPlayed < data.totalRounds) {
+                        hasUnplayed = true;
+                    }
+                });
+
+                if (!hasUnplayed || state.currentWeek >= state.totalWeeks + 5) {
+                    this.currentSeasonPreview = null;
+                    this.finalizeSeasonWeekly();
+                    this.updateSeasonSelects();
+                    const seasonSelector = document.getElementById("viewSeason");
+                    seasonSelector.value = this.seasonHistory.length;
+                    this.viewSeason(this.seasonHistory.length);
+                    this.updateWeekUI();
+
+                    if (progressContainer) {
+                        progressContainer.innerHTML = `<span style="color:#4ade80;font-weight:600;">✅ Temporada ${this.seasonHistory.length} concluída!</span>`;
+                    }
+                }
+            }
+
+            await new Promise(r => setTimeout(r, 10));
+        } finally {
+            button.disabled = false;
+        }
+    },
+
+    async startNewSeasonUI() {
+        if (this.seasonInProgress && !this.seasonState?.seasonComplete) {
+            alert("Complete todos os jogos da temporada atual antes de iniciar uma nova.");
+            return;
+        }
+
+        this.seasonState = null;
+        this.seasonInProgress = false;
+        this.currentSeasonPreview = null;
+
+        // Hide new season button, show advance
+        const newSeasonBtn = document.getElementById('newSeasonBtn');
+        if (newSeasonBtn) newSeasonBtn.style.display = 'none';
+
+        // Initialize and show week 0
+        this.currentSeason = this.seasonHistory.length + 1;
+        this.initializeWeeklySeason();
+        this.updateWeekUI();
+
+        const progressContainer = document.getElementById("seasonProgress");
+        if (progressContainer) {
+            progressContainer.innerHTML = `<span style="color:#4fc3f7;font-weight:600;">Temporada ${this.currentSeason} iniciada. Use Avançar Semana ou Continuar.</span>`;
+            progressContainer.style.display = 'block';
         }
     },
 
     async simulateNextSeason() {
-        const button = document.getElementById("simulateNextSeasonBtn"); 
+        const button = document.getElementById("simulateNextSeasonBtn");
         if (button.disabled) return;
-        
         button.disabled = true;
         const originalText = button.textContent;
-        
-        // Criar ou pegar container de progresso
-        let progressContainer = document.getElementById("seasonProgress");
-        if (!progressContainer) {
-            progressContainer = document.createElement("div");
-            progressContainer.id = "seasonProgress";
-            progressContainer.style.padding = "10px";
-            progressContainer.style.backgroundColor = "#f0f0f0";
-            progressContainer.style.marginBottom = "10px";
-            progressContainer.style.borderRadius = "5px";
-            progressContainer.style.textAlign = "center";
-            progressContainer.style.fontWeight = "bold";
-            document.getElementById("season").prepend(progressContainer);
-        }
-        
-        // Criar barra de progresso
-        let progressBar = document.getElementById("seasonProgressBar");
-        if (!progressBar) {
-            progressBar = document.createElement("div");
-            progressBar.id = "seasonProgressBar";
-            progressBar.style.width = "100%";
-            progressBar.style.backgroundColor = "#ddd";
-            progressBar.style.borderRadius = "4px";
-            progressBar.style.overflow = "hidden";
-            progressBar.style.height = "8px";
-            progressBar.style.marginTop = "6px";
-            progressBar.innerHTML = '<div id="seasonProgressFill" style="height:100%;width:0%;background:linear-gradient(90deg,#2196F3,#4CAF50);transition:width 0.2s;border-radius:4px;"></div>';
-            progressContainer.appendChild(progressBar);
-        }
-        progressBar.style.display = "block";
-        const progressFill = document.getElementById("seasonProgressFill") || progressBar.querySelector("div");
-        
+
         try {
-            const nextSeason = this.seasonHistory.length + 1; 
-            this.currentSeason = nextSeason;
-            
-            // Callback de progresso para mostrar qual competição está sendo simulada
-            const onProgress = (competitionName, index, total) => {
-                const percent = ((index + 1) / total * 100).toFixed(0);
-                progressContainer.childNodes[0].textContent = `Simulando ${competitionName}...`;
-                progressFill.style.width = `${percent}%`;
-                button.textContent = `Simulando... ${percent}%`;
-            };
-            
-            progressContainer.innerHTML = '';
-            const textNode = document.createElement("span");
-            textNode.textContent = `Simulando Temporada ${nextSeason}...`;
-            progressContainer.appendChild(textNode);
-            progressContainer.appendChild(progressBar);
-            progressContainer.style.backgroundColor = "#fff3cd";
-            progressContainer.style.color = "#856404";
-            progressFill.style.width = "0%";
-            
-            const seasonResult = await this.simulateSingleSeason(onProgress);
-            if (seasonResult) { 
-                this.updateSeasonSelects(); 
-                const seasonSelector = document.getElementById("viewSeason"); 
-                seasonSelector.value = nextSeason; 
-                this.viewSeason(nextSeason); 
-                
-                progressContainer.querySelector("span").textContent = `✅ Temporada ${nextSeason} simulada com sucesso`;
-                progressContainer.style.backgroundColor = "#d4edda";
-                progressContainer.style.color = "#155724";
-                progressFill.style.width = "100%";
+            // If a season is already in progress (partially advanced), continue it
+            // Otherwise start a new one
+            if (!this.seasonInProgress || !this.seasonState || this.seasonState.seasonComplete) {
+                this.seasonState = null;
+                this.seasonInProgress = false;
+                this.currentSeasonPreview = null;
+                this.currentSeason = this.seasonHistory.length + 1;
+                this.initializeWeeklySeason();
             }
-        } finally { 
-            button.disabled = false; 
+
+            const state = this.seasonState;
+            button.textContent = `Simulando...`;
+
+            // Run all remaining weeks
+            while (state.currentWeek < state.totalWeeks) {
+                state.currentWeek++;
+                this.playWeekMatches(state.currentWeek);
+                this.checkAndCompleteStages();
+                this.activatePendingStages();
+
+                // Yield every 5 weeks for UI
+                if (state.currentWeek % 5 === 0) {
+                    button.textContent = `Semana ${state.currentWeek}/${state.totalWeeks}`;
+                    this.updateWeekUI();
+                    await new Promise(r => setTimeout(r, 0));
+                }
+            }
+
+            // Play any remaining unplayed matches (extra weeks)
+            let extraWeeks = 0;
+            while (extraWeeks < 10) {
+                let hasUnplayed = false;
+                state.stageSchedules.forEach((data, stageId) => {
+                    if (!state.completedStages.has(stageId) && data.roundsPlayed < data.totalRounds) {
+                        hasUnplayed = true;
+                    }
+                });
+                if (!hasUnplayed) break;
+                
+                state.currentWeek++;
+                extraWeeks++;
+                // Play any remaining rounds
+                state.stageSchedules.forEach((data, stageId) => {
+                    if (state.completedStages.has(stageId)) return;
+                    while (data.roundsPlayed < data.totalRounds) {
+                        const roundIndex = data.roundsPlayed;
+                        // Create a temporary week plan entry
+                        const tempTasks = [{ stageId, roundIndex }];
+                        for (const task of tempTasks) {
+                            const td = state.stageSchedules.get(task.stageId);
+                            if (!td) continue;
+                            
+                            if (td.roundsPlayed === 0) {
+                                if (td.type === 'league' || td.type === 'potLeague') {
+                                    this.initializeStandings(td.teams);
+                                    td.standingsRef = this.standings;
+                                    td.standingsMapRef = this.standingsMap;
+                                } else if (td.type === 'group') {
+                                    td.groups.forEach(g => {
+                                        this.initializeStandings(g.teams);
+                                        g.standingsRef = this.standings;
+                                        g.standingsMapRef = this.standingsMap;
+                                    });
+                                } else if (td.type === 'crossGroup') {
+                                    this.initializeStandings(td.teams);
+                                    td.standingsRef = this.standings;
+                                    td.standingsMapRef = this.standingsMap;
+                                }
+                            }
+
+                            if (td.type === 'playoff') {
+                                const playoffResult = this.simulatePlayoff(td.teams, td.stage);
+                                td.playoffBracket = playoffResult.bracket;
+                                td.playoffData = playoffResult;
+                                td.standings = this.getPlayoffTeamsInOrder(playoffResult.bracket, playoffResult.winners);
+                                td.roundsPlayed = td.totalRounds;
+                            } else if (td.type === 'league' || td.type === 'potLeague') {
+                                this.standings = td.standingsRef;
+                                this.standingsMap = td.standingsMapRef;
+                                const rm = td.schedule[task.roundIndex];
+                                if (rm) rm.forEach(m => this.playMatch(m, td.clubsStats, td.clubsStatsMap));
+                                td.roundsPlayed = task.roundIndex + 1;
+                                this.sortStandings();
+                                td.standings = JSON.parse(JSON.stringify(this.standings));
+                            } else if (td.type === 'group') {
+                                td.groups.forEach(group => {
+                                    this.standings = group.standingsRef;
+                                    this.standingsMap = group.standingsMapRef;
+                                    const rm = group.schedule[task.roundIndex];
+                                    if (rm) rm.forEach(m => this.playMatch(m, td.clubsStats, td.clubsStatsMap));
+                                    this.sortStandings();
+                                    group.standings = JSON.parse(JSON.stringify(this.standings));
+                                });
+                                td.roundsPlayed = task.roundIndex + 1;
+                                td.standings = this.consolidateGroupStandings(td.groups);
+                            } else if (td.type === 'crossGroup') {
+                                this.standings = td.standingsRef;
+                                this.standingsMap = td.standingsMapRef;
+                                const rm = td.schedule[task.roundIndex];
+                                if (rm) rm.forEach(m => this.playMatch(m, td.clubsStats, td.clubsStatsMap));
+                                td.roundsPlayed = task.roundIndex + 1;
+                                this.sortStandings();
+                                td.standings = JSON.parse(JSON.stringify(this.standings));
+                                td.groups.forEach(g => {
+                                    g.standings = td.standings.filter(s => g.teams.some(t => t.id === s.id));
+                                    g.schedule = td.schedule.map(r => r.filter(m => g.teams.some(t => t.id === m.home || t.id === m.away)));
+                                    g.isCrossGroup = true;
+                                });
+                            }
+                        }
+                        break;
+                    }
+                });
+                this.checkAndCompleteStages();
+                this.activatePendingStages();
+            }
+
+            const seasonResult = this.finalizeSeasonWeekly();
+            if (seasonResult) {
+                // Reset state so advanceWeekUI can start a new season
+                this.seasonState = null;
+                this.seasonInProgress = false;
+                this.currentSeasonPreview = null;
+
+                this.updateSeasonSelects();
+                const seasonSelector = document.getElementById("viewSeason");
+                seasonSelector.value = this.seasonHistory.length;
+                this.viewSeason(this.seasonHistory.length);
+                this.updateWeekUI();
+
+                const progressContainer = document.getElementById("seasonProgress");
+                if (progressContainer) {
+                    progressContainer.style.display = 'block';
+                }
+            }
+        } catch (error) {
+        } finally {
+            button.disabled = false;
             button.textContent = originalText;
         }
     },
@@ -3406,6 +4246,30 @@ resetContinentalQualifications() {
         document.getElementById("viewSection").style.display = this.seasonHistory.length > 0 ? 'block' : 'none';
     },
 
+    updateSeasonSelectsWithPreview() {
+        const seasonSelector = document.getElementById("viewSeason"); 
+        seasonSelector.innerHTML = '';
+        
+        this.seasonHistory.forEach((s, i) => { 
+            const option = document.createElement("option");
+            option.value = i + 1; 
+            option.textContent = `Temporada ${i + 1}`; 
+            seasonSelector.appendChild(option); 
+        });
+        
+        // Add current in-progress season
+        if (this.currentSeasonPreview) {
+            const option = document.createElement("option");
+            option.value = 'current';
+            option.textContent = `Temporada ${this.seasonHistory.length + 1} (em andamento)`;
+            seasonSelector.appendChild(option);
+        }
+        
+        seasonSelector.disabled = false;
+        document.getElementById("seasonSelector").style.display = 'block';
+        document.getElementById("viewSection").style.display = 'block';
+    },
+
 // Mapeamento de tipos de competição
 competitionTypeNames: {
     0: 'Continental',
@@ -3418,14 +4282,24 @@ competitionTypeNames: {
 
     viewSeason(seasonNumber = null) {
         const selector = document.getElementById("viewSeason"); 
-        const season = seasonNumber || parseInt(selector.value);
+        const seasonValue = seasonNumber || selector.value;
         
-        if (!season || isNaN(season) || season < 1 || season > this.seasonHistory.length) {
-            document.getElementById("seasonResults").innerHTML = "<p>Selecione uma temporada válida</p>";
-            return;
+        let seasonData;
+        let season;
+        
+        // Handle in-progress season preview
+        if (seasonValue === 'current') {
+            seasonData = this.currentSeasonPreview;
+            season = this.seasonHistory.length + 1;
+        } else {
+            season = parseInt(seasonValue);
+            if (!season || isNaN(season) || season < 1 || season > this.seasonHistory.length) {
+                document.getElementById("seasonResults").innerHTML = "<p>Selecione uma temporada válida</p>";
+                return;
+            }
+            seasonData = this.seasonHistory[season - 1];
         }
         
-        const seasonData = this.seasonHistory[season - 1];
         if (!seasonData || !seasonData.competitions || seasonData.competitions.length === 0) {
             document.getElementById("seasonResults").innerHTML = "<p>Nenhum dado disponível para esta temporada</p>";
             return;
@@ -3481,9 +4355,18 @@ competitionTypeNames: {
         document.getElementById("viewCountrySelector").style.display = 'block';
     },
 
+    getSeasonData(season) {
+        if (season === undefined || season === null) season = this.currentSeason;
+        // If current season matches the preview, return preview
+        if (this.currentSeasonPreview && season === this.seasonHistory.length + 1) {
+            return this.currentSeasonPreview;
+        }
+        return this.seasonHistory[season - 1] || null;
+    },
+
     onViewCountryChange() {
         // Quando mudar o país, atualizar os tipos disponíveis e visualização
-        const seasonData = this.seasonHistory[this.currentSeason - 1];
+        const seasonData = this.getSeasonData();
         if (seasonData) {
             this.updateViewCompetitionTypeSelect(seasonData);
             this.viewCompetitionsByFilters();
@@ -3528,7 +4411,7 @@ competitionTypeNames: {
     },
 
     viewCompetitionsByFilters() {
-        const seasonData = this.seasonHistory[this.currentSeason - 1];
+        const seasonData = this.getSeasonData();
         if (!seasonData) return;
         
         const viewCountryId = document.getElementById("viewCountry").value;
@@ -3550,7 +4433,6 @@ competitionTypeNames: {
         this.currentDivisionIndex = 0;
         
         this.updateCompetitionSelectFiltered(filteredCompetitions);
-        this.updateDivisionDisplay();
         document.getElementById("seasonDivisionSelector").style.display = 'block';
         
         // Auto-selecionar primeira competição se houver
@@ -3595,7 +4477,8 @@ competitionTypeNames: {
         const competitionId = document.getElementById("viewCompetition").value;
         if (!competitionId) return;
         
-        const seasonData = this.seasonHistory[this.currentSeason - 1];
+        const seasonData = this.getSeasonData();
+        if (!seasonData) return;
         const competitionData = seasonData.competitions.find(c => c.competition.id === competitionId);
         if (!competitionData) return;
         
@@ -3741,21 +4624,7 @@ competitionTypeNames: {
         const newIndex = this.currentDivisionIndex + direction;
         if (newIndex >= 0 && newIndex < this.currentDivisions.length) { 
             this.currentDivisionIndex = newIndex; 
-            this.updateDivisionDisplay(); 
             this.viewSeason(); 
-        }
-    },
-
-    updateDivisionDisplay() {
-        const display = document.getElementById("divisionDisplay");
-        const upBtn = document.getElementById("divisionUp");
-        const downBtn = document.getElementById("divisionDown");
-        
-        if (this.currentDivisions.length > 0) {
-            const currentDivision = this.currentDivisions[this.currentDivisionIndex]; 
-            display.textContent = `D${currentDivision.importanceOrder}`;
-            upBtn.disabled = this.currentDivisionIndex === 0;
-            downBtn.disabled = this.currentDivisionIndex === this.currentDivisions.length - 1;
         }
     },
 
@@ -3823,7 +4692,7 @@ competitionTypeNames: {
         const container = document.getElementById("seasonTransfers");
         if (!container) return;
         
-        const seasonData = this.seasonHistory[this.currentSeason - 1];
+        const seasonData = this.getSeasonData();
         const hasTransfers = seasonData?.transfers?.length > 0;
         const hasRejected = seasonData?.rejectedOffers?.length > 0;
         
@@ -4708,7 +5577,7 @@ getRelevantTransitions() {
                 teamRelation = mainTeam ? `Time B de ${mainTeam.name}` : 'Time B';
             }
             
-            const currentSeasonData = this.seasonHistory[this.currentSeason - 1];
+            const currentSeasonData = this.getSeasonData();
             let seasonStats = null;
             if (currentSeasonData) {
                 for (const competitionData of currentSeasonData.competitions) {
@@ -4747,8 +5616,7 @@ const profileHTML = `
 
     <p><strong>Base Juvenil:</strong> ${team.youth || 10}/20</p>
     <p><strong>Formação:</strong> ${formationStats.formation}</p>
-    <p><strong>Ataque:</strong> ${Math.round(formationStats.attack)}</p>
-    <p><strong>Defesa:</strong> ${Math.round(formationStats.defense)}</p>
+    <p><strong>ATA:</strong> ${Math.round(formationStats.attack)}  <strong>MEI:</strong> ${Math.round(formationStats.midfield)}  <strong>DEF:</strong> ${Math.round(formationStats.defense)}</p>
 `;
             
             document.getElementById('profileContent').innerHTML = profileHTML;
@@ -4962,363 +5830,6 @@ ${statsHTML}`;
         });
     },
     
-    // ==================== SAVE/LOAD SYSTEM ====================
-
-async saveGame() {
-    try {
-        const messageDiv = document.getElementById("saveLoadMessage");
-        messageDiv.innerHTML = "Preparando dados para salvar...";
-        messageDiv.style.color = "#856404";
-        
-        // Criar um novo banco de dados SQLite em memória
-        const SQL = await initSqlJs({
-            locateFile: () => "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.wasm"
-        });
-        const db = new SQL.Database();
-        
-        // Criar tabelas
-        db.run("CREATE TABLE IF NOT EXISTS clubs (id TEXT PRIMARY KEY, name TEXT, rating REAL, countryId TEXT, bTeamOf TEXT, transferBalance INTEGER, youth INTEGER, originalRating REAL, competitions TEXT, stages TEXT, originalCompetitions TEXT, originalStages TEXT, dbOriginalCompetitions TEXT, dbOriginalStages TEXT)");
-        
-        db.run("CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, name TEXT, rating REAL, ratingPotential REAL, clubId TEXT, countryId TEXT, role INTEGER, dob INTEGER, retired INTEGER, isYouth INTEGER)");
-        
-        db.run("CREATE TABLE IF NOT EXISTS playerStats (playerId TEXT, year INTEGER, clubId TEXT, goals INTEGER, games INTEGER, isTransfer INTEGER, fromClub TEXT, transferValue INTEGER, PRIMARY KEY (playerId, year))");
-        
-        db.run("CREATE TABLE IF NOT EXISTS seasonHistory (seasonNumber INTEGER PRIMARY KEY, data TEXT)");
-        
-        db.run("CREATE TABLE IF NOT EXISTS clubFormations (clubId TEXT PRIMARY KEY, formation TEXT)");
-        
-        db.run("CREATE TABLE IF NOT EXISTS teamTitles (clubId TEXT, competitionId TEXT, count INTEGER, PRIMARY KEY (clubId, competitionId))");
-        
-        db.run("CREATE TABLE IF NOT EXISTS rejectedOffers (seasonNumber INTEGER, data TEXT)");
-        
-        db.run("CREATE TABLE IF NOT EXISTS nextSeasonInjections (stageId TEXT, clubIds TEXT, PRIMARY KEY (stageId))");
-        
-        db.run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
-        
-        // Salvar metadata
-        const metaData = {
-            currentSeason: this.currentSeason,
-            seasonHistoryLength: this.seasonHistory.length,
-            saveDate: new Date().toISOString(),
-            version: "1.0"
-        };
-        db.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", 
-            ['gameData', JSON.stringify(metaData)]);
-        
-        // Salvar clubes
-        const clubStmt = db.prepare("INSERT OR REPLACE INTO clubs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        this.clubs.forEach(club => {
-            clubStmt.run([
-                club.id,
-                club.name,
-                club.rating,
-                club.countryId,
-                club.bTeamOf || null,
-                club.transferBalance || 5000000,
-                club.youth || 10,
-                club.originalRating,
-                JSON.stringify(club.competitions || []),
-                JSON.stringify(club.stages || []),
-                JSON.stringify(club.originalCompetitions || []),
-                JSON.stringify(club.originalStages || []),
-                JSON.stringify(club.dbOriginalCompetitions || []),
-                JSON.stringify(club.dbOriginalStages || [])
-            ]);
-        });
-        clubStmt.free();
-        
-        // Salvar jogadores
-        const playerStmt = db.prepare("INSERT OR REPLACE INTO players VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        this.players.forEach(player => {
-            playerStmt.run([
-                player.id,
-                player.name,
-                player.rating,
-                player.ratingPotential,
-                player.clubId,
-                player.countryId,
-                player.role,
-                player.dob,
-                player.retired ? 1 : 0,
-                player.isYouth ? 1 : 0
-            ]);
-        });
-        playerStmt.free();
-        
-        // Salvar estatísticas dos jogadores
-        const statsStmt = db.prepare("INSERT OR REPLACE INTO playerStats VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-        this.playerStats.forEach(stat => {
-            statsStmt.run([
-                stat.playerId,
-                stat.year,
-                stat.clubId,
-                stat.goals || 0,
-                stat.games || 0,
-                stat.isTransfer ? 1 : 0,
-                stat.fromClub || null,
-                stat.transferValue || null
-            ]);
-        });
-        statsStmt.free();
-        
-        // Salvar histórico de temporadas
-        const seasonStmt = db.prepare("INSERT OR REPLACE INTO seasonHistory VALUES (?, ?)");
-        this.seasonHistory.forEach((season, index) => {
-            seasonStmt.run([index + 1, JSON.stringify(season)]);
-        });
-        seasonStmt.free();
-        
-        // Salvar formações dos clubes
-        const formationStmt = db.prepare("INSERT OR REPLACE INTO clubFormations VALUES (?, ?)");
-        this.clubFormations.forEach((formation, clubId) => {
-            formationStmt.run([clubId, formation]);
-        });
-        formationStmt.free();
-        
-        // Salvar títulos
-        const titlesStmt = db.prepare("INSERT OR REPLACE INTO teamTitles VALUES (?, ?, ?)");
-        this.teamTitles.forEach((titleData, clubId) => {
-            if (titleData && titleData.championships) {
-                titleData.championships.forEach((count, competitionId) => {
-                    titlesStmt.run([clubId, competitionId, count]);
-                });
-            }
-        });
-        titlesStmt.free();
-        
-        // Salvar ofertas rejeitadas da temporada atual
-        if (this.rejectedOffers && this.rejectedOffers.length > 0) {
-            db.run("INSERT OR REPLACE INTO rejectedOffers VALUES (?, ?)", 
-                [this.currentSeason, JSON.stringify(this.rejectedOffers)]);
-        }
-        
-        // Salvar injeções para próxima temporada
-        const injectionStmt = db.prepare("INSERT OR REPLACE INTO nextSeasonInjections VALUES (?, ?)");
-        this.nextSeasonInjections.forEach((clubs, stageId) => {
-            const clubIds = clubs.map(c => c.id).join(',');
-            injectionStmt.run([stageId, clubIds]);
-        });
-        injectionStmt.free();
-        
-        // Exportar para arquivo
-        const binaryArray = db.export();
-        const blob = new Blob([binaryArray], { type: 'application/octet-stream' });
-        const url = URL.createObjectURL(blob);
-        
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `futebol_save_t${this.currentSeason || 0}.db`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        
-        messageDiv.innerHTML = "✅ Jogo salvo com sucesso!";
-        messageDiv.style.color = "#155724";
-        
-        setTimeout(() => {
-            messageDiv.innerHTML = "";
-        }, 3000);
-        
-    } catch (error) {
-        console.error("Erro ao salvar jogo:", error);
-        const messageDiv = document.getElementById("saveLoadMessage");
-        messageDiv.innerHTML = `❌ Erro ao salvar: ${error.message}`;
-        messageDiv.style.color = "#721c24";
-    }
-},
-
-async loadGame(file) {
-    try {
-        const messageDiv = document.getElementById("saveLoadMessage");
-        messageDiv.innerHTML = "Carregando jogo...";
-        messageDiv.style.color = "#856404";
-        
-        const reader = new FileReader();
-        
-        reader.onload = async (e) => {
-            try {
-                const arrayBuffer = e.target.result;
-                const SQL = await initSqlJs({
-                    locateFile: () => "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.wasm"
-                });
-                const db = new SQL.Database(new Uint8Array(arrayBuffer));
-                
-                // Verificar se é um save válido
-                const metaResult = db.exec("SELECT value FROM meta WHERE key = 'gameData'");
-                if (!metaResult.length) {
-                    throw new Error("Arquivo não contém dados de jogo válidos");
-                }
-                
-                const metaData = JSON.parse(metaResult[0].values[0][0]);
-                
-                // Limpar dados atuais
-                this.clubs = [];
-                this.players = [];
-                this.playerStats = [];
-                this.seasonHistory = [];
-                this.clubFormations.clear();
-                this.teamTitles.clear();
-                this.rejectedOffers = [];
-                this.nextSeasonInjections.clear();
-                
-                // Carregar clubes
-                const clubsResult = db.exec("SELECT * FROM clubs");
-                if (clubsResult.length) {
-                    clubsResult[0].values.forEach(row => {
-                        const club = {
-                            id: row[0],
-                            name: row[1],
-                            rating: row[2],
-                            countryId: row[3],
-                            bTeamOf: row[4],
-                            transferBalance: row[5],
-                            youth: row[6],
-                            originalRating: row[7],
-                            competitions: JSON.parse(row[8] || '[]'),
-                            stages: JSON.parse(row[9] || '[]'),
-                            originalCompetitions: JSON.parse(row[10] || '[]'),
-                            originalStages: JSON.parse(row[11] || '[]'),
-                            dbOriginalCompetitions: JSON.parse(row[12] || '[]'),
-                            dbOriginalStages: JSON.parse(row[13] || '[]')
-                        };
-                        this.clubs.push(club);
-                    });
-                }
-                
-                // Carregar jogadores
-                const playersResult = db.exec("SELECT * FROM players");
-                if (playersResult.length) {
-                    playersResult[0].values.forEach(row => {
-                        const player = {
-                            id: row[0],
-                            name: row[1],
-                            rating: row[2],
-                            ratingPotential: row[3],
-                            clubId: row[4],
-                            countryId: row[5],
-                            role: row[6],
-                            dob: row[7],
-                            retired: row[8] === 1,
-                            isYouth: row[9] === 1
-                        };
-                        this.players.push(player);
-                    });
-                }
-                
-                // Carregar estatísticas
-                const statsResult = db.exec("SELECT * FROM playerStats");
-                if (statsResult.length) {
-                    statsResult[0].values.forEach(row => {
-                        const stat = {
-                            playerId: row[0],
-                            year: row[1],
-                            clubId: row[2],
-                            goals: row[3],
-                            games: row[4],
-                            isTransfer: row[5] === 1,
-                            fromClub: row[6],
-                            transferValue: row[7]
-                        };
-                        this.playerStats.push(stat);
-                    });
-                }
-                
-                // Carregar histórico de temporadas
-                const seasonResult = db.exec("SELECT * FROM seasonHistory ORDER BY seasonNumber");
-                if (seasonResult.length) {
-                    seasonResult[0].values.forEach(row => {
-                        const seasonData = JSON.parse(row[1]);
-                        this.seasonHistory.push(seasonData);
-                    });
-                }
-                
-                // Carregar formações
-                const formationsResult = db.exec("SELECT * FROM clubFormations");
-                if (formationsResult.length) {
-                    formationsResult[0].values.forEach(row => {
-                        this.clubFormations.set(row[0], row[1]);
-                    });
-                }
-                
-                // Carregar títulos
-                const titlesResult = db.exec("SELECT * FROM teamTitles");
-                if (titlesResult.length) {
-                    titlesResult[0].values.forEach(row => {
-                        const clubId = row[0];
-                        const compId = row[1];
-                        const count = row[2];
-                        
-                        if (!this.teamTitles.has(clubId)) {
-                            this.teamTitles.set(clubId, { championships: new Map() });
-                        }
-                        this.teamTitles.get(clubId).championships.set(compId, count);
-                    });
-                }
-                
-                // Carregar ofertas rejeitadas
-                const rejectedResult = db.exec("SELECT * FROM rejectedOffers");
-                if (rejectedResult.length) {
-                    rejectedResult[0].values.forEach(row => {
-                        if (row[0] === this.currentSeason) {
-                            this.rejectedOffers = JSON.parse(row[1]);
-                        }
-                    });
-                }
-                
-                // Carregar injeções para próxima temporada
-                const injectionsResult = db.exec("SELECT * FROM nextSeasonInjections");
-                if (injecçõesResult && injectionsResult.length) {
-                    injectionsResult[0].values.forEach(row => {
-                        const stageId = row[0];
-                        const clubIds = row[1].split(',').filter(id => id);
-                        const clubs = clubIds.map(id => this.getClub(id)).filter(Boolean);
-                        this.nextSeasonInjections.set(stageId, clubs);
-                    });
-                }
-                
-                // Atualizar estado
-                this.currentSeason = metaData.currentSeason || 0;
-                
-                // Reconstruir maps
-                this.buildClubsMap();
-                this.buildPlayersByClubCache();
-                
-                // Atualizar UI
-                this.updateSeasonSelects();
-                
-                if (this.seasonHistory.length > 0) {
-                    const seasonSelector = document.getElementById("viewSeason");
-                    if (seasonSelector) {
-                        seasonSelector.value = this.seasonHistory.length;
-                        this.viewSeason(this.seasonHistory.length);
-                    }
-                }
-                
-                messageDiv.innerHTML = `✅ Jogo carregado! Temporada ${this.currentSeason || 0}`;
-                messageDiv.style.color = "#155724";
-                
-                setTimeout(() => {
-                    messageDiv.innerHTML = "";
-                }, 3000);
-                
-            } catch (error) {
-                console.error("Erro ao processar arquivo:", error);
-                messageDiv.innerHTML = `❌ Erro ao carregar: ${error.message}`;
-                messageDiv.style.color = "#721c24";
-            }
-        };
-        
-        reader.readAsArrayBuffer(file);
-        
-    } catch (error) {
-        console.error("Erro ao carregar jogo:", error);
-        const messageDiv = document.getElementById("saveLoadMessage");
-        messageDiv.innerHTML = `❌ Erro ao carregar: ${error.message}`;
-        messageDiv.style.color = "#721c24";
-    }
-},
-    
     showTeamTrajectory(teamId) {
         const team = this.getClub(teamId);
         if (!team) return;
@@ -5412,6 +5923,477 @@ async loadGame(file) {
             ${tableHTML}
             `;
             document.getElementById('backToProfileBtn').addEventListener('click', () => this.showTeamProfile(teamId));
+        });
+    },
+
+    // =============================================
+    // === SISTEMA DE SAVE/LOAD BINÁRIO (.bin) ===
+    // =============================================
+
+    SAVE_MAGIC: [0x46, 0x42, 0x53, 0x56], // "FBSV"
+    SAVE_VERSION: 2,
+
+    // Extrai estado serializável — salva TUDO (exceto dados fixos: playerFicticiousNames, countries, continents, playerYouthReveal, competitionStageAwards)
+    getSerializableState() {
+        // Clubs: apenas dados mutáveis (nome, país, estádio, etc. vêm do DB e não mudam)
+        const clubs = this.clubs.map(c => ({
+            id: c.id,
+            rating: c.rating,
+            transferBalance: c.transferBalance,
+            youth: c.youth,
+            competitions: c.competitions ? [...c.competitions] : [],
+            stages: c.stages ? [...c.stages] : [],
+            originalCompetitions: c.originalCompetitions ? [...c.originalCompetitions] : [],
+            originalStages: c.originalStages ? [...c.originalStages] : []
+        }));
+
+        // Players: dados mutáveis + identificação mínima para jogadores gerados
+        const players = this.players.map(p => {
+            const obj = {
+                id: p.id,
+                rating: p.rating != null ? p.rating : 0,
+                ratingPotential: p.ratingPotential != null ? p.ratingPotential : 0,
+                clubId: p.clubId || null,
+                role: p.role || 0,
+                dob: p.dob || 2000,
+                retired: !!p.retired
+            };
+            // Salvar nome/país/originalClubId apenas para jogadores gerados (youth)
+            // que não existem no DB original
+            if (p._generated) {
+                obj.name = p.name;
+                obj.countryId = p.countryId;
+                obj.originalClubId = p.originalClubId;
+                obj._generated = true;
+            }
+            return obj;
+        });
+
+        // teamTitles: Map → object
+        const titles = {};
+        if (this.teamTitles && this.teamTitles.forEach) {
+            this.teamTitles.forEach((val, key) => {
+                if (!key) return;
+                const champs = {};
+                if (val && val.championships && val.championships.forEach) {
+                    val.championships.forEach((count, compId) => {
+                        if (compId != null) champs[compId] = count || 0;
+                    });
+                }
+                titles[key] = champs;
+            });
+        }
+
+        // clubFormations: Map → object
+        const formations = {};
+        if (this.clubFormations && this.clubFormations.forEach) {
+            this.clubFormations.forEach((val, key) => {
+                if (key != null) formations[key] = val;
+            });
+        }
+
+        // nextSeasonInjections: Map → object (salva IDs dos clubs)
+        const injections = {};
+        if (this.nextSeasonInjections && this.nextSeasonInjections.forEach) {
+            this.nextSeasonInjections.forEach((clubList, stageId) => {
+                if (stageId != null && Array.isArray(clubList)) {
+                    injections[stageId] = clubList.filter(c => c && c.id).map(c => c.id);
+                }
+            });
+        }
+
+        // seasonHistory: salva como está, sem compactar
+        const history = JSON.parse(JSON.stringify(this.seasonHistory || []));
+
+        // playerStats: salva como está
+        const stats = JSON.parse(JSON.stringify(this.playerStats || []));
+
+        // Estado da temporada em progresso
+        let weeklyState = null;
+        if (this.seasonInProgress && this.seasonState) {
+            weeklyState = JSON.parse(JSON.stringify(this.seasonState));
+        }
+
+        return {
+            clubs, players, titles, formations, injections, history, stats,
+            currentSeason: this.currentSeason || 0,
+            seasonInProgress: !!this.seasonInProgress,
+            weeklyState,
+            rejectedOffers: JSON.parse(JSON.stringify(this.rejectedOffers || [])),
+            standings: JSON.parse(JSON.stringify(this.standings || [])),
+            schedule: JSON.parse(JSON.stringify(this.schedule || [])),
+            playoffBracket: JSON.parse(JSON.stringify(this.playoffBracket || [])),
+            currentGroups: JSON.parse(JSON.stringify(this.currentGroups || [])),
+            currentGroupIndex: this.currentGroupIndex || 0,
+            currentDivisions: JSON.parse(JSON.stringify(this.currentDivisions || [])),
+            currentDivisionIndex: this.currentDivisionIndex || 0,
+            currentCompetition: this.currentCompetition ? JSON.parse(JSON.stringify(this.currentCompetition)) : null,
+            currentStage: this.currentStage ? JSON.parse(JSON.stringify(this.currentStage)) : null,
+            currentSeasonPreview: this.currentSeasonPreview ? JSON.parse(JSON.stringify(this.currentSeasonPreview)) : null,
+            saveVersion: 2
+        };
+    },
+
+    // Restaurar estado a partir de dados desserializados
+    restoreState(state) {
+        // Restaurar clubs — apenas dados mutáveis, nunca sobrescrever dados fixos do DB
+        if (state.clubs) {
+            const clubMap = new Map(this.clubs.map(c => [c.id, c]));
+            state.clubs.forEach(saved => {
+                if (!saved || !saved.id) return;
+                const club = clubMap.get(saved.id);
+                if (!club) return; // Club não existe no DB, ignorar
+                // Apenas atualizar campos que mudam durante simulação
+                if (saved.rating != null) club.rating = saved.rating;
+                if (saved.transferBalance != null) club.transferBalance = saved.transferBalance;
+                if (saved.youth != null) club.youth = saved.youth;
+                if (Array.isArray(saved.competitions) && saved.competitions.length > 0) club.competitions = saved.competitions;
+                if (Array.isArray(saved.stages) && saved.stages.length > 0) club.stages = saved.stages;
+                if (Array.isArray(saved.originalCompetitions) && saved.originalCompetitions.length > 0) {
+                    club.originalCompetitions = saved.originalCompetitions;
+                } else if (Array.isArray(saved.competitions) && saved.competitions.length > 0) {
+                    club.originalCompetitions = saved.competitions;
+                }
+                if (Array.isArray(saved.originalStages) && saved.originalStages.length > 0) {
+                    club.originalStages = saved.originalStages;
+                } else if (Array.isArray(saved.stages) && saved.stages.length > 0) {
+                    club.originalStages = saved.stages;
+                }
+            });
+        }
+
+        // Restaurar players — apenas dados mutáveis, preservar nome/país do DB
+        if (state.players) {
+            this.players.forEach(p => p.retired = true);
+            const playerMap = new Map(this.players.map(p => [p.id, p]));
+            
+            state.players.forEach(saved => {
+                if (!saved || !saved.id) return;
+                let player = playerMap.get(saved.id);
+                if (player) {
+                    // Apenas atualizar campos mutáveis, nunca sobrescrever nome/país/originalClubId do DB
+                    if (saved.rating != null) player.rating = saved.rating;
+                    if (saved.ratingPotential != null) player.ratingPotential = saved.ratingPotential;
+                    player.clubId = saved.clubId || null;
+                    if (saved.role != null) player.role = saved.role;
+                    if (saved.dob != null) player.dob = saved.dob;
+                    player.retired = !!saved.retired;
+                } else if (saved._generated || (typeof saved.id === 'string' && (saved.id.startsWith('youth_') || saved.id.startsWith('gen_')))) {
+                    // Jogador gerado (youth/fictício) que não existe no DB — criar completo
+                    const newPlayer = {
+                        id: saved.id,
+                        name: saved.name || 'Jogador ' + saved.id,
+                        rating: saved.rating || 0,
+                        ratingPotential: saved.ratingPotential || 0,
+                        clubId: saved.clubId || null,
+                        countryId: saved.countryId || null,
+                        role: saved.role || 0,
+                        dob: saved.dob || 2000,
+                        retired: !!saved.retired,
+                        originalClubId: saved.originalClubId || null,
+                        _generated: true
+                    };
+                    this.players.push(newPlayer);
+                }
+                // Se o jogador não existe no DB e não é gerado, ignorar (evita dados corrompidos)
+            });
+        }
+
+        // Restaurar teamTitles
+        if (state.titles) {
+            this.teamTitles = new Map();
+            Object.entries(state.titles).forEach(([clubId, champs]) => {
+                const championships = new Map();
+                Object.entries(champs).forEach(([compId, count]) => {
+                    championships.set(compId, count);
+                });
+                this.teamTitles.set(clubId, { championships });
+            });
+        }
+
+        // Restaurar clubFormations
+        if (state.formations) {
+            this.clubFormations = new Map();
+            Object.entries(state.formations).forEach(([key, val]) => {
+                this.clubFormations.set(key, val);
+            });
+        }
+
+        // Restaurar nextSeasonInjections
+        if (state.injections) {
+            this.nextSeasonInjections = new Map();
+            Object.entries(state.injections).forEach(([stageId, clubIds]) => {
+                const clubs = clubIds.map(id => this.clubs.find(c => c.id === id)).filter(Boolean);
+                if (clubs.length > 0) this.nextSeasonInjections.set(stageId, clubs);
+            });
+        }
+
+        // Restaurar playerStats como está
+        if (state.stats) {
+            this.playerStats = state.stats;
+        }
+
+        // Restaurar seasonHistory como está
+        if (state.history) {
+            this.seasonHistory = state.history;
+        }
+
+        this.currentSeason = state.currentSeason || this.seasonHistory.length;
+
+        // Restaurar rejectedOffers
+        this.rejectedOffers = state.rejectedOffers || [];
+
+        // Restaurar estado de simulação
+        if (state.seasonInProgress && state.weeklyState) {
+            this.seasonState = state.weeklyState;
+            this.seasonInProgress = true;
+        } else {
+            this.seasonState = null;
+            this.seasonInProgress = false;
+        }
+        this.currentSeasonPreview = state.currentSeasonPreview || null;
+        this.standings = state.standings || [];
+        this.schedule = state.schedule || [];
+        this.playoffBracket = state.playoffBracket || [];
+        this.currentGroups = state.currentGroups || [];
+        this.currentGroupIndex = state.currentGroupIndex || 0;
+        this.currentDivisions = state.currentDivisions || [];
+        this.currentDivisionIndex = state.currentDivisionIndex || 0;
+        this.currentCompetition = state.currentCompetition || null;
+        this.currentStage = state.currentStage || null;
+
+        // Rebuildar caches
+        this.buildClubsMap();
+        this.playersMap = new Map(this.players.map(p => [p.id, p]));
+        this.invalidatePlayerCache();
+    },
+
+    // Serializar estado para ArrayBuffer comprimido (.bin)
+    async exportSave() {
+        const state = this.getSerializableState();
+        const json = JSON.stringify(state);
+        const textEncoder = new TextEncoder();
+        const data = textEncoder.encode(json);
+
+        // Header: FBSV (4) + version (2) + seasonCount (4) + uncompressedSize (4) = 14 bytes
+        const header = new ArrayBuffer(14);
+        const headerView = new DataView(header);
+        this.SAVE_MAGIC.forEach((b, i) => headerView.setUint8(i, b));
+        headerView.setUint16(4, this.SAVE_VERSION, true);
+        headerView.setUint32(6, this.seasonHistory.length, true);
+        headerView.setUint32(10, data.byteLength, true);
+
+        // Comprimir com gzip
+        const compressed = await this._compress(data);
+
+        // Juntar header + compressed
+        const result = new Uint8Array(header.byteLength + compressed.byteLength);
+        result.set(new Uint8Array(header), 0);
+        result.set(compressed, header.byteLength);
+
+        return result.buffer;
+    },
+
+    // Desserializar ArrayBuffer (.bin) para estado
+    async importSave(buffer) {
+        const view = new DataView(buffer);
+
+        // Validar magic
+        for (let i = 0; i < 4; i++) {
+            if (view.getUint8(i) !== this.SAVE_MAGIC[i]) {
+                throw new Error('Arquivo .bin inválido: magic bytes incorretos');
+            }
+        }
+
+        const version = view.getUint16(4, true);
+        if (version > this.SAVE_VERSION) {
+            throw new Error(`Versão do save (${version}) não suportada. Atualize o simulador.`);
+        }
+
+        const seasonCount = view.getUint32(6, true);
+        // const uncompressedSize = view.getUint32(10, true); // Para validação futura
+
+        // Dados comprimidos começam no byte 14
+        const compressed = new Uint8Array(buffer, 14);
+        const decompressed = await this._decompress(compressed);
+
+        const textDecoder = new TextDecoder();
+        const json = textDecoder.decode(decompressed);
+        const state = JSON.parse(json);
+
+        return { state, seasonCount, version };
+    },
+
+    async _compress(data) {
+        if (typeof CompressionStream !== 'undefined') {
+            const cs = new CompressionStream('gzip');
+            const writer = cs.writable.getWriter();
+            writer.write(data);
+            writer.close();
+            const reader = cs.readable.getReader();
+            const chunks = [];
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+            }
+            const totalLength = chunks.reduce((sum, c) => sum + c.byteLength, 0);
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                result.set(chunk, offset);
+                offset += chunk.byteLength;
+            }
+            return result;
+        } else {
+            // Fallback: sem compressão (browsers muito antigos)
+            return data;
+        }
+    },
+
+    async _decompress(data) {
+        if (typeof DecompressionStream !== 'undefined') {
+            const ds = new DecompressionStream('gzip');
+            const writer = ds.writable.getWriter();
+            writer.write(data);
+            writer.close();
+            const reader = ds.readable.getReader();
+            const chunks = [];
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+            }
+            const totalLength = chunks.reduce((sum, c) => sum + c.byteLength, 0);
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                result.set(chunk, offset);
+                offset += chunk.byteLength;
+            }
+            return result;
+        } else {
+            return data;
+        }
+    },
+
+    // Download do save como .bin
+async downloadSave() {
+    try {
+        const saveData = {
+            clubs: this.clubs,
+            players: this.players,
+            seasonHistory: this.seasonHistory,
+            currentSeason: this.currentSeason,
+            teamTitles: Array.from(this.teamTitles.entries()),
+            playerStats: this.playerStats,
+            // rejectedOffers removido para poupar espaço
+        };
+
+        const jsonString = JSON.stringify(saveData);
+        const encoder = new TextEncoder();
+        const data = encoder.encode(jsonString);
+
+        // Compressão GZIP real
+        const cs = new CompressionStream('gzip');
+        const writer = cs.writable.getWriter();
+        writer.write(data);
+        writer.close();
+
+        const compressedBuffer = await new Response(cs.readable).arrayBuffer();
+        const blob = new Blob([compressedBuffer], { type: 'application/octet-stream' });
+        
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `save_temporada_${this.currentSeason}.bin`;
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        console.error("Erro ao salvar:", e);
+        alert("Erro ao gerar ficheiro binário.");
+    }
+},
+
+
+    // Upload e restauração de save .bin
+async uploadSave(file) {
+    try {
+        const button = document.getElementById('loadProgressBtn');
+        button.disabled = true;
+
+        const arrayBuffer = await file.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+        
+        let jsonString;
+
+        // VERIFICAÇÃO DE COMPATIBILIDADE:
+        // GZIP sempre começa com os bytes 0x1f 0x8b
+        if (uint8[0] === 0x1f && uint8[1] === 0x8b) {
+            // Ficheiro Novo (Binário Comprimido)
+            const ds = new DecompressionStream('gzip');
+            const writer = ds.writable.getWriter();
+            writer.write(arrayBuffer);
+            writer.close();
+            const decompressedBuffer = await new Response(ds.readable).arrayBuffer();
+            jsonString = new TextDecoder().decode(decompressedBuffer);
+        } else {
+            // Ficheiro Antigo (Texto JSON)
+            jsonString = new TextDecoder().decode(arrayBuffer);
+        }
+        
+        const data = JSON.parse(jsonString);
+
+        // Restaura os dados no objeto App
+        this.clubs = data.clubs;
+        this.players = data.players;
+        this.seasonHistory = data.seasonHistory || [];
+        this.currentSeason = data.currentSeason;
+        this.teamTitles = new Map(data.teamTitles || []);
+        this.playerStats = data.playerStats || [];
+        this.rejectedOffers = []; // Limpa lixo acumulado
+
+        // --- ATUALIZAÇÃO DA UI SEM RELOAD ---
+        this.buildClubsMap(); // Recria os índices internos O(1)
+        this.updateSeasonSelects(); // Atualiza a lista de temporadas no menu
+        
+        // Se houver histórico, mostra a última temporada carregada
+        if (this.seasonHistory.length > 0) {
+            const lastSeason = this.seasonHistory.length;
+            document.getElementById("viewSeason").value = lastSeason;
+            this.viewSeason(lastSeason); 
+        }
+
+        // Feedback visual
+        const progress = document.getElementById("seasonProgress");
+        if (progress) {
+            progress.innerHTML = `<span style="color:#4ade80;">✅ Save carregado com sucesso!</span>`;
+            progress.style.display = 'block';
+        }
+
+        alert("Progresso carregado com sucesso!");
+
+    } catch (e) {
+        console.error('Erro no Load:', e);
+        alert('Este ficheiro não é um save válido ou está incompatível.');
+    } finally {
+        document.getElementById('loadProgressBtn').disabled = false;
+    }
+},
+
+    setupSaveLoadListeners() {
+        const saveBtn = document.getElementById('saveProgressBtn');
+        const loadBtn = document.getElementById('loadProgressBtn');
+        const fileInput = document.getElementById('loadFileInput');
+
+        if (saveBtn) saveBtn.addEventListener('click', () => this.downloadSave());
+        if (loadBtn) loadBtn.addEventListener('click', () => fileInput.click());
+        if (fileInput) fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                this.uploadSave(file);
+                fileInput.value = ''; // Reset para permitir carregar o mesmo arquivo de novo
+            }
         });
     }
 };

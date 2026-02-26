@@ -14,9 +14,7 @@
         <!-- Header -->
         <header class="header">
             <div class="header-content">
-                <div class="header-icon">
-                    <!-- ícone removido -->
-                </div>
+                <div class="header-icon"></div>
                 <div class="header-text">
                     <h1>Simulador de Futebol</h1>
                     <p>Simule partidas e temporadas completas</p>
@@ -63,39 +61,39 @@
         <div id="season" class="tabcontent" style="display: none;">
             <div id="seasonProgress"></div>
             
+            <!-- Week Indicator -->
+            <div id="weekIndicator" class="section-card" style="display: none;">
+                <div class="week-display">
+                    <span id="weekLabel">Semana 0 / 52</span>
+                    <div class="week-bar">
+                        <div id="weekFill" class="week-fill" style="width: 0%;"></div>
+                    </div>
+                    <span id="weekStatus" class="week-status"></span>
+                </div>
+            </div>
+            
             <div class="section-card">
                 <div class="section-header">
-                    <h2>Configurações</h2>
+                    <h2>Controles</h2>
                 </div>
                 
                 <div class="controls">
-                    <div class="select-group">
-                        <label>Temporadas:</label>
-                        <input type="number" id="numSeasons" min="1" max="100" value="5">
-                    </div>
-                    
                     <div class="button-group">
-                        <button id="simulateSeasonBtn" class="btn btn-success btn-large">
-                            SIMULAR
-                        </button>
-<div class="section-card" style="margin-top: 20px;">
-    <div class="section-header">
-        <h2>Salvar/Carregar Progresso</h2>
-    </div>
-    <div class="controls" style="display: flex; gap: 10px; justify-content: center;">
-        <button id="saveGameBtn" class="btn btn-primary btn-large">
-            <i class="fas fa-download"></i> Salvar Jogo (.db)
-        </button>
-        <button id="loadGameBtn" class="btn btn-warning btn-large">
-            <i class="fas fa-upload"></i> Carregar Jogo (.db)
-        </button>
-        <input type="file" id="loadGameFile" accept=".db" style="display: none;">
-    </div>
-    <div id="saveLoadMessage" style="text-align: center; margin-top: 10px; font-size: 14px;"></div>
-</div>
-                        <button id="simulateNextSeasonBtn" class="btn btn-info btn-large" style="display: none;">
+                        <button id="simulateNextSeasonBtn" class="btn btn-success btn-large">
                             CONTINUAR
                         </button>
+                        <button id="advanceWeekBtn" class="btn btn-info btn-large">
+                            AVANÇAR SEMANA
+                        </button>
+                    </div>
+                    <div class="button-group" style="margin-top: 10px;">
+                        <button id="saveProgressBtn" class="btn btn-warning btn-large">
+                         SALVAR
+                        </button>
+                        <button id="loadProgressBtn" class="btn btn-secondary btn-large">
+                             CARREGAR
+                        </button>
+                        <input type="file" id="loadFileInput" accept=".bin" style="display:none;">
                     </div>
                 </div>
             </div>
@@ -134,17 +132,17 @@
                         <select id="viewStage"></select>
                     </div>
                     
-<div class="select-group" id="groupSelector" style="display: none;">
-    <div class="group-navigator">
-        <button class="group-btn" id="groupPrev">
-            <i class="fas fa-chevron-left"></i>
-        </button>
-        <span class="group-display" id="groupDisplay">Grupo A</span>
-        <button class="group-btn" id="groupNext">
-            <i class="fas fa-chevron-right"></i>
-        </button>
-    </div>
-</div>
+                    <div class="select-group" id="groupSelector" style="display: none;">
+                        <div class="group-navigator">
+                            <button class="group-btn" id="groupPrev">
+                                <i class="fas fa-chevron-left"></i>
+                            </button>
+                            <span class="group-display" id="groupDisplay">Grupo A</span>
+                            <button class="group-btn" id="groupNext">
+                                <i class="fas fa-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
                     
                     <button id="viewPlayoffBtn" class="btn btn-warning" style="display: none;">
                         Ver Playoff
@@ -186,11 +184,9 @@
             btn.addEventListener('click', function() {
                 const tab = this.dataset.tab;
                 
-                // Update nav items
                 document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
                 this.classList.add('active');
                 
-                // Update tab content
                 document.querySelectorAll('.tabcontent').forEach(t => {
                     t.classList.remove('active');
                     t.style.display = 'none';
@@ -200,7 +196,6 @@
                 activeTab.classList.add('active');
                 activeTab.style.display = 'block';
                 
-                // Show view section if season tab and results exist
                 if (tab === 'season' && document.getElementById('seasonResults').innerHTML.trim() !== '') {
                     document.getElementById('viewSection').style.display = 'block';
                 }

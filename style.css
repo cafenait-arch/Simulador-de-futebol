@@ -4,9 +4,9 @@
     padding: 0;
     box-sizing: border-box;
     border: none;
-    font-family: 'Roboo', sans-serif;
+    font-family: 'Arimo', sans-serif;
     font-weight: bold;
-    font-size: 13px;
+    font-size: 11px;
 }
 
 /* Base */
@@ -170,7 +170,6 @@ input {
     border-radius: 4px;
     background: white;
     transition: all 0.2s;
-    overflow: auto;
 }
 
 select:focus,
@@ -181,9 +180,7 @@ input:focus {
 }
 
 input[type="number"] {
-    width: 50px;
-    max-width: 50px;
-    overflow: auto;
+    width: 70px;
 }
 
 /* Buttons */
@@ -257,15 +254,15 @@ button:active {
 .division-btn {
     padding: 4px 8px;
     min-width: 32px;
-    background: linear-gradient(135deg, #6b7280, #9ca3af);
 }
 
 .group-display,
 .division-display {
     font-weight: 600;
-    min-width: 70px;
+    max-width: 70px;
     text-align: center;
-    color: #374151;
+    background: none;
+    border: none;
 }
 
 /* Results */
@@ -383,7 +380,7 @@ button:active {
 .standings-table td:first-child {
     text-align: center;
     font-weight: bold;
-    width: 26px;
+    min-width: 20px;
 }
 
 /* Matches */
@@ -430,8 +427,8 @@ button:active {
 }
 
 .logo {
-    width: 13px;
-    height: 13px;
+    width: 14px;
+    height: 14px;
     display: inline-block;
     vertical-align: middle;
 }

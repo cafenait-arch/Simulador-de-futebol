@@ -6,7 +6,7 @@
     <title>Simulador de Futebol</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Arimo&display=swap" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;500;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@100;300;400;500;700;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
 </head>
 <body>
@@ -57,6 +57,19 @@
             <div id="result" class="result-container"></div>
         </div>
 
+        <!-- Save Slot Picker Modal -->
+        <div id="saveSlotModal" class="save-slot-modal" style="display: none;">
+            <div class="save-slot-overlay" onclick="App.closeSaveSlotModal()"></div>
+            <div class="save-slot-content">
+                <h2>Selecionar Save</h2>
+                <div id="saveSlotList" class="save-slot-list"></div>
+                <div class="save-slot-actions">
+                    <button class="btn btn-success" onclick="App.createNewSave()">+ Novo Save</button>
+                    <button class="btn btn-secondary" onclick="App.closeSaveSlotModal(true)">Sem save (novo jogo)</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Tab: Temporadas -->
         <div id="season" class="tabcontent" style="display: none;">
             <div id="seasonProgress"></div>
@@ -90,8 +103,11 @@
                         <button id="saveProgressBtn" class="btn btn-warning btn-large">
                          SALVAR
                         </button>
+                        <button id="downloadBackupBtn" class="btn btn-info btn-large">
+                         DOWNLOAD BACKUP
+                        </button>
                         <button id="loadProgressBtn" class="btn btn-secondary btn-large">
-                             CARREGAR
+                             UPLOAD BACKUP
                         </button>
                         <input type="file" id="loadFileInput" accept=".bin" style="display:none;">
                     </div>
@@ -132,18 +148,6 @@
                         <select id="viewStage"></select>
                     </div>
                     
-                    <div class="select-group" id="groupSelector" style="display: none;">
-                        <div class="group-navigator">
-                            <button class="group-btn" id="groupPrev">
-                                <i class="fas fa-chevron-left"></i>
-                            </button>
-                            <span class="group-display" id="groupDisplay">Grupo A</span>
-                            <button class="group-btn" id="groupNext">
-                                <i class="fas fa-chevron-right"></i>
-                            </button>
-                        </div>
-                    </div>
-                    
                     <button id="viewPlayoffBtn" class="btn btn-warning" style="display: none;">
                         Ver Playoff
                     </button>
@@ -155,6 +159,17 @@
             
             <div id="seasonResults" class="league-results">
                 <div id="seasonInfo" class="season-info"></div>
+                <div class="select-group" id="groupSelector" style="display: none;">
+                        <div class="group-navigator">
+                            <button class="group-btn" id="groupPrev">
+                                <i class="fas fa-chevron-left"></i>
+                            </button>
+                            <span class="group-display" id="groupDisplay">Grupo A</span>
+                            <button class="group-btn" id="groupNext">
+                                <i class="fas fa-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
                 <div id="seasonStandings" class="standings-container"></div>
                 <div class="select-group" id="roundSelector" style="display: none;">
                         <label>Rodada:</label>
@@ -203,4 +218,4 @@
         });
     </script>
 </body>
-</html>
+</html>                         

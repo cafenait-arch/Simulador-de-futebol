@@ -3,6 +3,8 @@ const App = {
     competitionStageTransitions: [], competitionStageAwards: [], zipData: null, logoCache: new Map(), flagCache: new Map(), teamTitles: new Map(),
     players: [], playerFicticiousNames: [], playerStats: [], playerYouthReveal: [],
     seasonHistory: [], currentSeason: 0, currentCompetition: null, currentStage: null,
+    teamTrajectories: new Map(), // teamId → [{year, competition, stage, position, games, wins, draws, losses, points}]
+    _clubPlayersCache: null, // PERF: clubId → [players] cache for transfers
     standings: [], schedule: [], playoffBracket: [], 
     currentGroups: [], currentGroupIndex: 0, currentDivisions: [], currentDivisionIndex: 0,
     clubFormations: new Map(),
@@ -308,8 +310,7 @@ this.competitionStageTransitions = getTable("CompetitionStageTransition").map(([
             { id: "groupNext", event: "click", fn: () => this.changeGroup(1) },
             { id: "divisionUp", event: "click", fn: () => this.changeDivision(-1) },
             { id: "divisionDown", event: "click", fn: () => this.changeDivision(1) },
-            { id: "viewPlayoffBtn", event: "click", fn: () => this.togglePlayoffView() },
-            { id: "viewTransfersBtn", event: "click", fn: () => this.toggleTransfersView() }
+            { id: "viewPlayoffBtn", event: "click", fn: () => this.togglePlayoffView() }
         ].forEach(({ id, event, fn }) => document.getElementById(id)?.addEventListener(event, fn));
     },
 
@@ -1978,15 +1979,15 @@ isTransferWindowOpen(week) {
 runWeeklyTransfers(week) {
     if (!this.isTransferWindowOpen(week)) return;
 
-    // Na primeira semana da janela, limpar ofertas rejeitadas
+    // Na primeira semana da janela, limpar e preparar cache
     if (week === 1 || week === 28) {
         this.rejectedOffers = [];
+        this._buildClubPlayersCache();
     }
 
-    // Criar lista de jogadores disponíveis
+    // Criar lista de jogadores disponíveis (usa cache interno)
     const transferList = this.createTransferList();
 
-    // Processar ~1/9 ou ~1/5 dos clubes por semana para distribuir ao longo da janela
     const shuffledClubs = [...this.clubs].sort(() => Math.random() - 0.5);
     const windowSize = (week <= 9) ? 9 : 5;
     const clubsPerWeek = Math.ceil(shuffledClubs.length / windowSize);
@@ -2000,14 +2001,35 @@ runWeeklyTransfers(week) {
 },
 
 runTransferWindow() {
-    // Fallback para simular temporada inteira de uma vez (simula todas as semanas de janela)
     this.rejectedOffers = [];
+    this._buildClubPlayersCache();
     for (let w = 1; w <= 9; w++) {
         this.runWeeklyTransfers(w);
     }
     for (let w = 28; w <= 32; w++) {
         this.runWeeklyTransfers(w);
     }
+    this._invalidateClubPlayersCache();
+},
+
+// PERF: Build cached club→players map
+_buildClubPlayersCache() {
+    this._clubPlayersCache = new Map();
+    this.players.forEach(p => {
+        if (!this._clubPlayersCache.has(p.clubId)) {
+            this._clubPlayersCache.set(p.clubId, []);
+        }
+        this._clubPlayersCache.get(p.clubId).push(p);
+    });
+},
+
+_getClubPlayers(clubId) {
+    if (!this._clubPlayersCache) this._buildClubPlayersCache();
+    return this._clubPlayersCache.get(clubId) || [];
+},
+
+_invalidateClubPlayersCache() {
+    this._clubPlayersCache = null;
 },
 
 // -------------------------------
@@ -2015,7 +2037,7 @@ runTransferWindow() {
 // Retorna valor entre 0 (baixa) e 1 (essencial)
 // -------------------------------
 calculatePlayerImportance(player, club) {
-    const clubPlayers = this.players.filter(p => p.clubId === club.id);
+    const clubPlayers = this._getClubPlayers(club.id);
     if (clubPlayers.length === 0) return 0.5;
     
     // Média do elenco
@@ -2147,7 +2169,7 @@ getCurrentTransferWindow() {
 // PROCESSA TRANSFERÊNCIAS DE UM CLUBE
 // -------------------------------
 processClubTransfers(club, transferList) {
-    let clubPlayers = this.players.filter(p => p.clubId === club.id);
+    let clubPlayers = this._getClubPlayers(club.id);
     
     // PASSO 1: Verificar Youth upgrade ANTES de gastar em transferências
     const youthLevel = club.youth || 10;
@@ -2291,7 +2313,6 @@ negotiateTransfer(player, sellingClub, buyingClub, initialOffer, baseValue, aski
         const evaluation = this.evaluateOffer(player, sellingClub, currentOffer, baseValue);
         
         if (evaluation.accepted) {
-            // Transferência aceita!
             const success = this.executeTransfer(player, sellingClub, buyingClub, currentOffer);
             return { 
                 success, 
@@ -2300,30 +2321,11 @@ negotiateTransfer(player, sellingClub, buyingClub, initialOffer, baseValue, aski
             };
         }
         
-        // Rejeição - registrar oferta rejeitada
-        this.rejectedOffers.push({
-            playerId: player.id,
-            playerName: player.name,
-            fromClubId: sellingClub.id,
-            fromClubName: sellingClub.name,
-            toClubId: buyingClub.id,
-            toClubName: buyingClub.name,
-            offerValue: currentOffer,
-            askingPrice: evaluation.askingPrice || askingPrice,
-            reason: evaluation.reason,
-            round: rounds + 1
-        });
-        
         // Tenta aumentar a oferta
-        const newOffer = currentOffer * 1.08; // Aumenta 8%
+        const newOffer = currentOffer * 1.08;
         
-        // Se não pode pagar mais ou já está perto do preço pedido, desiste
         if (newOffer > maxBudget || currentOffer >= askingPrice * 0.98) {
-            return { 
-                success: false, 
-                reason: 'negotiation_failed',
-                finalOffer: currentOffer
-            };
+            return { success: false };
         }
         
         currentOffer = newOffer;
@@ -2368,17 +2370,15 @@ analyzeTeamNeeds(club, clubPlayers) {
 // EXECUTA TRANSFERÊNCIA
 // -------------------------------
 executeTransfer(player, sellingClub, buyingClub, value) {
-    const sellerPlayers = this.players.filter(p => p.clubId === sellingClub.id && p.id !== player.id);
+    const sellerPlayers = this._getClubPlayers(sellingClub.id).filter(p => p.id !== player.id);
     const samePositionPlayers = sellerPlayers.filter(p => p.role === player.role);
     
-    // Mínimos: 1 GK, 6 DEF, 7 MID, 5 ATK
     const minByRole = { 1: 1, 2: 6, 3: 7, 4: 5 };
     const minForRole = minByRole[player.role] || 1;
     if (samePositionPlayers.length < minForRole) return false;
-    if (sellerPlayers.length < 15) return false; // Não vender se ficar com menos de 15
+    if (sellerPlayers.length < 15) return false;
     if (buyingClub.transferBalance < value) return false;
     
-    // Verificar limites antes de executar
     const currentWindow = this.getCurrentTransferWindow();
     const record = this.seasonTransfers.get(player.id);
     if (record) {
@@ -2390,8 +2390,9 @@ executeTransfer(player, sellingClub, buyingClub, value) {
     buyingClub.transferBalance -= value;
     sellingClub.transferBalance += value;
     
-    // IMPORTANTE: Invalidar cache para que o jogador jogue pelo novo time imediatamente
+    // Invalidar caches
     this.invalidatePlayerCache();
+    this._invalidateClubPlayersCache();
     
     // Registrar transferência do jogador
     if (!this.seasonTransfers.has(player.id)) {
@@ -2403,20 +2404,7 @@ executeTransfer(player, sellingClub, buyingClub, value) {
         rec.windows.push(currentWindow);
     }
     
-    const currentYear = this.seasonHistory.length + 1;
-    const transferStat = {
-        playerId: player.id,
-        year: currentYear,
-        clubId: buyingClub.id,
-        goals: 0,
-        games: 0,
-        isTransfer: true,
-        fromClub: sellingClub.id,
-        transferValue: value
-    };
-    this.playerStats.push(transferStat);
-    
-    // IMPORTANTE: forçar atualização do cache de stats para o jogador atuar pelo novo clube imediatamente
+    // Forçar atualização do cache de stats
     this.playerStatsCache = null;
     
     return true;
@@ -2969,11 +2957,10 @@ distributeAwards(stageId, standings) {
         // Invalidar cache após transferências para que a próxima temporada use dados atualizados
         this.invalidatePlayerCache();
         
-        // Guardar relatório de transferências na temporada
-        seasonResult.transfers = this.getTransferReport();
-        seasonResult.rejectedOffers = this.getRejectedOffersReport();
-        
+        // Agregar trajetória ANTES de purgar
         this.seasonHistory.push(seasonResult);
+        this.aggregateTrajectoryData(seasonResult);
+        this.purgeOldSeasons();
         
         return seasonResult;
     },
@@ -3028,6 +3015,61 @@ distributeAwards(stageId, standings) {
             championId: championId,
             type: 0
         };
+    },
+
+    // Agregar dados de trajetória de um seasonResult (posições finais de cada time em cada competição/fase)
+    aggregateTrajectoryData(seasonResult) {
+        const year = seasonResult.season || this.seasonHistory.length;
+        
+        seasonResult.competitions.forEach(competitionData => {
+            const competition = competitionData.competition;
+            
+            competitionData.stages.forEach(stageData => {
+                if (!stageData.standings) return;
+                
+                stageData.standings.forEach((teamStanding, index) => {
+                    if (!this.teamTrajectories.has(teamStanding.id)) {
+                        this.teamTrajectories.set(teamStanding.id, []);
+                    }
+                    this.teamTrajectories.get(teamStanding.id).push({
+                        year,
+                        competition: competition.name,
+                        stage: stageData.stage.name,
+                        position: index + 1,
+                        games: teamStanding.played || 0,
+                        wins: teamStanding.won || 0,
+                        draws: teamStanding.drawn || 0,
+                        losses: teamStanding.lost || 0,
+                        points: teamStanding.points || 0
+                    });
+                });
+            });
+        });
+    },
+
+    // Purgar dados detalhados de temporadas anteriores para liberar memória
+    purgeOldSeasons() {
+        // Manter apenas a última temporada com dados completos para visualização
+        if (this.seasonHistory.length <= 1) return;
+        
+        // Substituir temporadas antigas por stubs mínimos
+        for (let i = 0; i < this.seasonHistory.length - 1; i++) {
+            this.seasonHistory[i] = {
+                season: this.seasonHistory[i].season,
+                year: this.seasonHistory[i].year,
+                competitions: [], // Dados detalhados purgados
+                _purged: true
+            };
+        }
+        
+        // Limpar playerStats de transferência (não precisamos mais)
+        this.playerStats = this.playerStats.filter(s => !s.isTransfer);
+        
+        // Limpar rejectedOffers
+        this.rejectedOffers = [];
+        
+        // Limpar seasonTransfers (já não precisa entre temporadas)
+        this.seasonTransfers = new Map();
     },
 
 
@@ -4043,10 +4085,10 @@ if (hasUncompletedFeeders) return;
         this.evolvePlayersEndOfSeason();
         this.invalidatePlayerCache();
 
-        seasonResult.transfers = this.getTransferReport();
-        seasonResult.rejectedOffers = this.getRejectedOffersReport();
-
         this.seasonHistory.push(seasonResult);
+        this.aggregateTrajectoryData(seasonResult);
+        this.purgeOldSeasons();
+        
         document.getElementById('saveProgressBtn').style.display = 'inline-block';
         this.seasonInProgress = false;
         state.seasonComplete = true;
@@ -4421,23 +4463,28 @@ if (hasUncompletedFeeders) return;
         const seasonSelector = document.getElementById("viewSeason"); 
         seasonSelector.innerHTML = '';
         
+        // Apenas mostrar temporadas com dados (não purgadas)
         this.seasonHistory.forEach((s, i) => { 
+            if (s._purged) return;
             const option = document.createElement("option");
             option.value = i + 1; 
             option.textContent = `Temporada ${i + 1}`; 
             seasonSelector.appendChild(option); 
         });
         
-        seasonSelector.disabled = this.seasonHistory.length === 0; 
-        document.getElementById("seasonSelector").style.display = this.seasonHistory.length > 0 ? 'block' : 'none';
-        document.getElementById("viewSection").style.display = this.seasonHistory.length > 0 ? 'block' : 'none';
+        const hasOptions = seasonSelector.options.length > 0;
+        seasonSelector.disabled = !hasOptions; 
+        document.getElementById("seasonSelector").style.display = hasOptions ? 'block' : 'none';
+        document.getElementById("viewSection").style.display = hasOptions ? 'block' : 'none';
     },
 
     updateSeasonSelectsWithPreview() {
         const seasonSelector = document.getElementById("viewSeason"); 
         seasonSelector.innerHTML = '';
         
+        // Apenas temporadas não purgadas
         this.seasonHistory.forEach((s, i) => { 
+            if (s._purged) return;
             const option = document.createElement("option");
             option.value = i + 1; 
             option.textContent = `Temporada ${i + 1}`; 
@@ -4499,16 +4546,6 @@ competitionTypeNames: {
         
         // Preencher select de tipos de competição
         this.updateViewCompetitionTypeSelect(seasonData);
-        
-        // Mostrar botão de transferências se houver transferências ou ofertas rejeitadas
-        const transfersBtn = document.getElementById("viewTransfersBtn");
-        const hasTransfers = seasonData.transfers && seasonData.transfers.length > 0;
-        const hasRejected = seasonData.rejectedOffers && seasonData.rejectedOffers.length > 0;
-        if (hasTransfers || hasRejected) {
-            transfersBtn.style.display = 'inline-block';
-        } else {
-            transfersBtn.style.display = 'none';
-        }
         
         this.viewCompetitionsByFilters();
     },
@@ -4655,9 +4692,6 @@ competitionTypeNames: {
         document.getElementById("roundSelector").style.display = 'none';
         document.getElementById("groupSelector").style.display = 'none';
         document.getElementById("viewPlayoffBtn").style.display = 'none';
-        document.getElementById("seasonTransfers").style.display = 'none';
-        const transfersBtn = document.getElementById("viewTransfersBtn");
-        if (transfersBtn) transfersBtn.innerHTML = 'Ver Transferências';
     },
 
     viewCompetition() {
@@ -4854,151 +4888,16 @@ competitionTypeNames: {
     },
 
     async toggleTransfersView() {
-        const standings = document.getElementById("seasonStandings");
-        const matches = document.getElementById("seasonMatches");
-        const transfers = document.getElementById("seasonTransfers");
-        const button = document.getElementById("viewTransfersBtn");
-        const playoff = document.getElementById("playoffBracket");
-        
-        if (transfers.style.display === "none") {
-            standings.style.display = "none";
-            matches.style.display = "none";
-            playoff.style.display = "none";
-            transfers.style.display = "block";
-            button.innerHTML = 'Ver Tabela';
-            await this.displayTransfers();
-        } else {
-            standings.style.display = "block";
-            matches.style.display = "block";
-            transfers.style.display = "none";
-            button.innerHTML = 'Ver Transferências';
-        }
+        // Transferências removidas para economizar memória
+        return;
     },
 
     async displayTransfers() {
-        const container = document.getElementById("seasonTransfers");
-        if (!container) return;
-        
-        const seasonData = this.getSeasonData();
-        const hasTransfers = seasonData?.transfers?.length > 0;
-        const hasRejected = seasonData?.rejectedOffers?.length > 0;
-        
-        if (!hasTransfers && !hasRejected) {
-            container.innerHTML = `  
-            <div class="section-card">  
-                <div class="section-header">  
-                    <h2>Transferências - T${this.currentSeason}</h2>  
-                </div>  
-                <p style="text-align: center; color: #888; padding: 10px;">Nenhuma transferência.</p>  
-            </div>  
-        `;
-            return;
-        }
-        
-        // Carregar todos os logos e bandeiras de uma vez  
-        const allClubIds = new Set();
-        const allCountryIds = new Set();
-        if (seasonData.transfers) {
-            seasonData.transfers.forEach(t => {
-                if (t.fromId) allClubIds.add(t.fromId);
-                if (t.toId) allClubIds.add(t.toId);
-                if (t.playerCountryId) allCountryIds.add(t.playerCountryId);
-            });
-        }
-        if (seasonData.rejectedOffers) {
-            seasonData.rejectedOffers.forEach(t => {
-                if (t.fromId) allClubIds.add(t.fromId);
-                if (t.toId) allClubIds.add(t.toId);
-                if (t.playerCountryId) allCountryIds.add(t.playerCountryId);
-            });
-        }
-        
-        const [logoEntries, flagEntries] = await Promise.all([
-            Promise.all(Array.from(allClubIds).map(async id => [id, await this.loadLogo(id)])),
-            Promise.all(Array.from(allCountryIds).map(async id => [id, await this.loadFlag(id)]))
-        ]);
-        const logoMap = new Map(logoEntries);
-        const flagMap = new Map(flagEntries);
-        
-        // Transferências concluídas  
-        let transfersHtml = '';
-        if (hasTransfers) {
-            seasonData.transfers.forEach(transfer => {
-                const fromLogo = logoMap.get(transfer.fromId) || '';
-                const toLogo = logoMap.get(transfer.toId) || '';
-                const playerFlag = flagMap.get(transfer.playerCountryId) || '';
-                
-                transfersHtml += `  
-                <div style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #e8e8e8; font-size: 13px; background: #f8fff8;">  
-    ${playerFlag ? `<img src="${playerFlag}" alt="" class="flag-icon">` : ''}${transfer.player}
-</span>
-                    ${fromLogo ? `<img src="${fromLogo}" alt="" style="width: 20px; height: 20px; object-fit: contain;">` : '<span style="width:20px;"></span>'}  
-                    ${toLogo ? `<img src="${toLogo}" alt="" style="width: 20px; height: 20px; object-fit: contain;">` : '<span style="width:20px;"></span>'}  
-                    <span style="color: #2196F3; font-weight: 600; font-size: 12px; white-space: nowrap;">${transfer.value}</span>  
-                </div>  
-            `;
-            });
-        }
-        
-        // Ofertas rejeitadas  
-        let rejectedHtml = '';
-        if (hasRejected) {
-            seasonData.rejectedOffers.forEach(offer => {
-                const fromLogo = logoMap.get(offer.fromId) || '';
-                const toLogo = logoMap.get(offer.toId) || '';
-                const playerFlag = flagMap.get(offer.playerCountryId) || '';
-                
-                rejectedHtml += `  
-                <div style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid #f0e0e0; font-size: 12px; background: #fff8f8;">  
-    ${playerFlag ? `<img src="${playerFlag}" alt="" class="flag-icon-small">` : ''}${offer.player}
-</span>
-                    ${fromLogo ? `<img src="${fromLogo}" alt="" style="width: 18px; height: 18px; object-fit: contain; opacity: 0.7;">` : '<span style="width:18px;"></span>'}  
-                    ${toLogo ? `<img src="${toLogo}" alt="" style="width: 18px; height: 18px; object-fit: contain; opacity: 0.7;">` : '<span style="width:18px;"></span>'}  
-                    <span style="color: #e53935; font-size: 10px; white-space: nowrap;" title="Oferta: ${offer.offerValue} | Pedido: ${offer.askingPrice}">  
-                        ${offer.offerValue}
-                    </span>  
-                    <span style="background: #ffebee; color: #c62828; font-size: 9px; padding: 2px 4px; border-radius: 3px; white-space: nowrap;">  
-                        ${offer.reason}  
-                    </span>  
-                </div>  
-            `;
-            });
-        }
-        
-        container.innerHTML = `  
-        <div class="section-card" style="padding: 8px;">  
-            <div class="section-header" style="margin-bottom: 8px;">  
-                <span style="font-size: 14px; font-weight: 600;">Transferências - T${this.currentSeason}</span>  
-                <span style="margin-left: auto; font-size: 11px; color: #666;">  
-                    <span style="color: #4CAF50;">${seasonData.transfers?.length || 0} ✓</span>  
-                    ${hasRejected ? `<span style="color: #e53935; margin-left: 8px;">${seasonData.rejectedOffers.length} ✗</span>` : ''}  
-                </span>  
-            </div>  
-              
-            ${hasTransfers ? `  
-                <div style="margin-bottom: 12px;">  
-                    <div style="font-size: 12px; font-weight: 600; color: #2e7d32; padding: 4px 8px; background: #e8f5e9; border-radius: 4px; margin-bottom: 4px;">  
- Transferências Concluídas  
-                    </div>  
-                    <div style="max-height: 250px; overflow-y: auto; border-radius: 4px;">  
-                        ${transfersHtml}  
-                    </div>  
-                </div>  
-            ` : ''}  
-              
-            ${hasRejected ? `  
-                <div>  
-                    <div style="font-size: 12px; font-weight: 600; color: #c62828; padding: 4px 8px; background: #ffebee; border-radius: 4px; margin-bottom: 4px;">  
- Ofertas Rejeitadas  
-                    </div>  
-                    <div style="max-height: 200px; overflow-y: auto; border-radius: 4px;">  
-                        ${rejectedHtml}  
-                    </div>  
-                </div>  
-            ` : ''}  
-        </div>  
-    `;
+        // Removido - dados de transferência não são mais armazenados
+        return;
     },
+
+
 
 
     async displayStandings(containerId) {
@@ -5987,35 +5886,8 @@ ${statsHTML}`;
         const team = this.getClub(teamId);
         if (!team) return;
         
-        let trajectoryData = [];
-        
-        this.seasonHistory.forEach((season, seasonIndex) => {
-            const year = seasonIndex + 1;
-            
-            season.competitions.forEach(competitionData => {
-                const competition = competitionData.competition;
-                
-                competitionData.stages.forEach(stageData => {
-                    if (stageData.standings) {
-                        const teamStanding = stageData.standings.find(s => s.id === teamId);
-                        if (teamStanding) {
-                            const position = stageData.standings.indexOf(teamStanding) + 1;
-                            trajectoryData.push({
-                                year: year,
-                                competition: competition.name,
-                                stage: stageData.stage.name,
-                                games: teamStanding.played,
-                                wins: teamStanding.won,
-                                draws: teamStanding.drawn,
-                                losses: teamStanding.lost,
-                                position: `${position}º`,
-                                points: teamStanding.points
-                            });
-                        }
-                    }
-                });
-            });
-        });
+        // Usar dados agregados da trajetória (não depende de seasonHistory)
+        const trajectoryData = this.teamTrajectories.get(teamId) || [];
         
         let tableHTML = '';
         if (trajectoryData.length > 0) {
@@ -6049,7 +5921,7 @@ ${statsHTML}`;
                     <td>${data.draws}</td>
                     <td>${data.losses}</td>
                     <td>${data.points}</td>
-                    <td>${data.position}</td>
+                    <td>${data.position}º</td>
                 </tr>
                 `;
             });
@@ -6300,10 +6172,18 @@ ${statsHTML}`;
             });
         }
 
-        // seasonHistory: salva como está, sem compactar
+        // teamTrajectories: Map → object
+        const trajectories = {};
+        if (this.teamTrajectories && this.teamTrajectories.forEach) {
+            this.teamTrajectories.forEach((arr, teamId) => {
+                if (teamId != null) trajectories[teamId] = arr;
+            });
+        }
+
+        // seasonHistory: salva como está (já purgado)
         const history = JSON.parse(JSON.stringify(this.seasonHistory || []));
 
-        // playerStats: salva como está
+        // playerStats: salva como está (sem isTransfer)
         const stats = JSON.parse(JSON.stringify(this.playerStats || []));
 
         // Estado da temporada em progresso
@@ -6313,11 +6193,10 @@ ${statsHTML}`;
         }
 
         return {
-            clubs, players, titles, formations, injections, history, stats,
+            clubs, players, titles, formations, injections, trajectories, history, stats,
             currentSeason: this.currentSeason || 0,
             seasonInProgress: !!this.seasonInProgress,
             weeklyState,
-            rejectedOffers: JSON.parse(JSON.stringify(this.rejectedOffers || [])),
             standings: JSON.parse(JSON.stringify(this.standings || [])),
             schedule: JSON.parse(JSON.stringify(this.schedule || [])),
             playoffBracket: JSON.parse(JSON.stringify(this.playoffBracket || [])),
@@ -6412,6 +6291,14 @@ ${statsHTML}`;
             });
         }
 
+        // Restaurar teamTrajectories
+        if (state.trajectories) {
+            this.teamTrajectories = new Map();
+            Object.entries(state.trajectories).forEach(([teamId, arr]) => {
+                this.teamTrajectories.set(teamId, arr);
+            });
+        }
+
         // Restaurar clubFormations
         if (state.formations) {
             this.clubFormations = new Map();
@@ -6441,8 +6328,8 @@ ${statsHTML}`;
 
         this.currentSeason = state.currentSeason || this.seasonHistory.length;
 
-        // Restaurar rejectedOffers
-        this.rejectedOffers = state.rejectedOffers || [];
+        // rejectedOffers não são mais usados
+        this.rejectedOffers = [];
 
         // Restaurar estado de simulação
         if (state.seasonInProgress && state.weeklyState) {

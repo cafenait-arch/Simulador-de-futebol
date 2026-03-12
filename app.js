@@ -180,8 +180,8 @@ try {
     this.players = getTable("Player").map(([id, name, rating, ratingPotential, clubId, countryId, role, dob]) => ({
         id: id != null ? id.toString() : null,
         name,
-        rating: +rating,
-        ratingPotential: +ratingPotential,
+        rating: Math.round(+rating),
+        ratingPotential: Math.round(+ratingPotential),
         clubId: clubId != null ? clubId.toString() : null,
         countryId: countryId != null ? countryId.toString() : null,
         role: +role,
@@ -1727,8 +1727,8 @@ getNextPlayerId() {
         this.players.push({
             id: this.getNextPlayerId(),
             name,
-            rating,
-            ratingPotential,
+            rating: Math.round(rating),
+            ratingPotential: Math.round(ratingPotential),
             clubId,
             countryId: playerCountryId,
             role,
@@ -1861,8 +1861,8 @@ simulateGoalScorers(lineup, goals) {
 playerStatsCache: null,
 currentStatsYear: 0,
 
-getPlayerStatsCacheKey(playerId, year) {
-    return `${playerId}_${year}`;
+getPlayerStatsCacheKey(playerId, year, clubId) {
+    return `${playerId}_${year}_${clubId}`;
 },
 
 ensurePlayerStatsCache() {
@@ -1873,7 +1873,7 @@ ensurePlayerStatsCache() {
         // Popular cache com stats existentes do ano atual
         this.playerStats.forEach(s => {
             if (s.year === currentYear) {
-                this.playerStatsCache.set(this.getPlayerStatsCacheKey(s.playerId, s.year), s);
+                this.playerStatsCache.set(this.getPlayerStatsCacheKey(s.playerId, s.year, s.clubId), s);
             }
         });
     }
@@ -1883,15 +1883,16 @@ ensurePlayerStatsCache() {
 addPlayerGoal(playerId) {
     this.ensurePlayerStatsCache();
     const currentYear = this.seasonHistory.length + 1;
-    const cacheKey = this.getPlayerStatsCacheKey(playerId, currentYear);
+    const player = this.playersMap ? this.playersMap.get(playerId) : this.players.find(p => p.id === playerId);
+    const clubId = player ? player.clubId : null;
+    const cacheKey = this.getPlayerStatsCacheKey(playerId, currentYear, clubId);
     let stat = this.playerStatsCache.get(cacheKey);
     
     if (!stat) {
-        const player = this.players.find(p => p.id === playerId);
         stat = {
             playerId,
             year: currentYear,
-            clubId: player ? player.clubId : null,
+            clubId,
             goals: 0,
             games: 0
         };
@@ -1906,15 +1907,16 @@ addPlayerGoal(playerId) {
 addPlayerGame(playerId) {
     this.ensurePlayerStatsCache();
     const currentYear = this.seasonHistory.length + 1;
-    const cacheKey = this.getPlayerStatsCacheKey(playerId, currentYear);
+    const player = this.playersMap ? this.playersMap.get(playerId) : this.players.find(p => p.id === playerId);
+    const clubId = player ? player.clubId : null;
+    const cacheKey = this.getPlayerStatsCacheKey(playerId, currentYear, clubId);
     let stat = this.playerStatsCache.get(cacheKey);
     
     if (!stat) {
-        const player = this.players.find(p => p.id === playerId);
         stat = {
             playerId,
             year: currentYear,
-            clubId: player ? player.clubId : null,
+            clubId,
             goals: 0,
             games: 0
         };
@@ -1925,8 +1927,11 @@ addPlayerGame(playerId) {
     stat.games++;
 },
 
-evolvePlayersEndOfSeason() {
-    const retiredIds = [];
+// Calcula evolução/declínio total da temporada e armazena por jogador
+// Chamado no início da temporada
+calculateSeasonEvolution(totalWeeks) {
+    this._playerSeasonEvolution = new Map();
+    const retireCandidates = [];
     
     this.players.forEach(player => {
         const age = this.getPlayerAge(player);
@@ -1934,43 +1939,88 @@ evolvePlayersEndOfSeason() {
         if (age >= 33) {
             const retireChance = Math.min(0.8, (age - 32) * 0.1);
             if (Math.random() < retireChance) {
-                retiredIds.push(player.id);
+                retireCandidates.push(player.id);
                 return;
             }
-            
-            const decline = (age - 32) * (0.4 + Math.random() * 0.6);
-            player.rating = Math.max(20, player.rating - decline);
+            const totalDecline = (age - 32) * (0.4 + Math.random() * 0.6);
+            this._playerSeasonEvolution.set(player.id, {
+                totalChange: -totalDecline,
+                perWeek: -totalDecline / totalWeeks,
+                floatRating: player.rating // track precise float
+            });
             return;
         }
         
         if (player.rating >= player.ratingPotential) return;
         
         const distanceFromPotential = player.ratingPotential - player.rating;
-        
         let growth = distanceFromPotential * (0.1 + Math.random() * 0.35);
-        
         const maxAnnualGrowth = Math.min(10, distanceFromPotential * 0.2 + 2);
-        
         growth = Math.min(growth, maxAnnualGrowth);
         
-        player.rating = Math.min(
-            player.ratingPotential,
-            player.rating + growth
-        );
+        this._playerSeasonEvolution.set(player.id, {
+            totalChange: growth,
+            perWeek: growth / totalWeeks,
+            floatRating: player.rating // track precise float
+        });
     });
     
-    // Remover jogadores aposentados permanentemente
+    this._seasonRetireCandidates = retireCandidates;
+},
+
+// Aplica a fração semanal de evolução
+applyWeeklyEvolution() {
+    if (!this._playerSeasonEvolution) return;
+    
+    this._playerSeasonEvolution.forEach((evo, playerId) => {
+        const player = this.playersMap?.get(playerId);
+        if (!player) return;
+        
+        // Accumulate on the precise float
+        evo.floatRating += evo.perWeek;
+        
+        // Clamp
+        if (evo.totalChange > 0) {
+            evo.floatRating = Math.min(player.ratingPotential, evo.floatRating);
+        } else {
+            evo.floatRating = Math.max(20, evo.floatRating);
+        }
+        
+        // Only update visible rating when the rounded value changes
+        player.rating = Math.round(evo.floatRating);
+    });
+},
+
+// Finaliza evolução: aposenta jogadores, limpa estado
+evolvePlayersEndOfSeason() {
+    // Aplicar qualquer resto não aplicado
+    if (this._playerSeasonEvolution) {
+        this._playerSeasonEvolution.forEach((evo, playerId) => {
+            const player = this.playersMap?.get(playerId);
+            if (!player) return;
+            // floatRating already has all weekly accumulations; just ensure final round
+            if (evo.totalChange > 0) {
+                player.rating = Math.round(Math.min(player.ratingPotential, evo.floatRating));
+            } else {
+                player.rating = Math.round(Math.max(20, evo.floatRating));
+            }
+        });
+    }
+    
+    // Remover jogadores aposentados
+    const retiredIds = this._seasonRetireCandidates || [];
     if (retiredIds.length > 0) {
         const retiredSet = new Set(retiredIds);
-        // Remover estatísticas dos jogadores aposentados para evitar mistura com novos jogadores
         this.playerStats = this.playerStats.filter(s => !retiredSet.has(String(s.playerId)) && !retiredSet.has(s.playerId));
-        // Limpar cache de stats para forçar recriação
         this.playerStatsCache = null;
         this.currentStatsYear = 0;
         this.players = this.players.filter(p => !retiredSet.has(p.id));
         this.invalidatePlayerCache();
         this.playersMap = new Map(this.players.map(p => [p.id, p]));
     }
+    
+    this._playerSeasonEvolution = null;
+    this._seasonRetireCandidates = null;
 },
 isTransferWindowOpen(week) {
     return (week >= 1 && week <= 9) || (week >= 28 && week <= 32);
@@ -3640,6 +3690,7 @@ if (stage.startWeek != null && stage.endWeek != null) {
         };
 
         this.seasonInProgress = true;
+        this.calculateSeasonEvolution(actualTotalWeeks);
         return this.seasonState;
     },
 
@@ -4210,6 +4261,9 @@ if (hasUncompletedFeeders) return;
 
             state.currentWeek++;
 
+            // Evolução semanal dos jogadores
+            this.applyWeeklyEvolution();
+
             // Transferências semanais (janelas: semanas 1-9 e 28-32)
             this.runWeeklyTransfers(state.currentWeek);
 
@@ -4239,6 +4293,13 @@ if (hasUncompletedFeeders) return;
 
             // Build preview and show Visualizar Resultados section (wrapped in try-catch to never break season flow)
             try {
+                // Save current selections before rebuilding
+                const savedCountry = document.getElementById("viewCountry")?.value;
+                const savedType = document.getElementById("viewCompetitionType")?.value;
+                const savedCompetition = document.getElementById("viewCompetition")?.value;
+                const savedStage = document.getElementById("viewStage")?.value;
+                const savedRound = document.getElementById("viewRound")?.value;
+
                 const preview = this.buildCurrentSeasonPreview();
                 if (preview && preview.competitions.length > 0) {
                     this.currentSeasonPreview = preview;
@@ -4247,6 +4308,48 @@ if (hasUncompletedFeeders) return;
                     if (seasonSelector) {
                         seasonSelector.value = 'current';
                         this.viewSeason('current');
+                    }
+
+                    // Restore saved selections if they are still valid
+                    const countrySelect = document.getElementById("viewCountry");
+                    if (savedCountry && countrySelect) {
+                        const countryOption = Array.from(countrySelect.options).find(o => o.value === savedCountry);
+                        if (countryOption) {
+                            countrySelect.value = savedCountry;
+                            this.onViewCountryChange();
+                        }
+                    }
+                    const typeSelect = document.getElementById("viewCompetitionType");
+                    if (savedType && typeSelect) {
+                        const typeOption = Array.from(typeSelect.options).find(o => o.value === savedType);
+                        if (typeOption) {
+                            typeSelect.value = savedType;
+                            this.viewCompetitionsByFilters();
+                        }
+                    }
+                    const competitionSelect = document.getElementById("viewCompetition");
+                    if (savedCompetition && competitionSelect) {
+                        const compOption = Array.from(competitionSelect.options).find(o => o.value === savedCompetition);
+                        if (compOption) {
+                            competitionSelect.value = savedCompetition;
+                            this.viewCompetition();
+                        }
+                    }
+                    const stageSelect = document.getElementById("viewStage");
+                    if (savedStage && stageSelect) {
+                        const stageOption = Array.from(stageSelect.options).find(o => o.value === savedStage);
+                        if (stageOption) {
+                            stageSelect.value = savedStage;
+                            this.viewStage();
+                        }
+                    }
+                    const roundSelect = document.getElementById("viewRound");
+                    if (savedRound && roundSelect) {
+                        const roundOption = Array.from(roundSelect.options).find(o => o.value === savedRound);
+                        if (roundOption) {
+                            roundSelect.value = savedRound;
+                            this.viewRound();
+                        }
                     }
                 }
             } catch (previewErr) {
@@ -4332,6 +4435,7 @@ if (hasUncompletedFeeders) return;
             // Run all remaining weeks
             while (state.currentWeek < state.totalWeeks) {
                 state.currentWeek++;
+                this.applyWeeklyEvolution();
                 this.runWeeklyTransfers(state.currentWeek);
                 this.playWeekMatches(state.currentWeek);
                 this.checkAndCompleteStages();
@@ -5512,11 +5616,11 @@ getRelevantTransitions() {
             if (hasTwoLegs) {
                 const idaRound = document.createElement("div");
                 idaRound.className = "playoff-round";
-                idaRound.innerHTML = `<h4>${roundName} - Ida</h4>`;
+                idaRound.innerHTML = `<h4>${roundName}Ida</h4>`;
                 
                 const voltaRound = document.createElement("div");
                 voltaRound.className = "playoff-round";
-                voltaRound.innerHTML = `<h4>${roundName} - Volta</h4>`;
+                voltaRound.innerHTML = `<h4>${roundName}Volta</h4>`;
                 
                 for (const match of round.matches) {
                     
@@ -5607,9 +5711,9 @@ getRelevantTransitions() {
     },
 
     getRoundName(roundNumber, totalRounds) {
-        const roundNames = ["Final", "Semi-final", "Quartas-de-final", "Oitavas-de-final", "16 avos-de-final"];
+        const roundNames = [""];
         const index = totalRounds - roundNumber;
-        return roundNames[index] || `Rodada ${roundNumber}`;
+        return roundNames[index];
     },
 
     showTeamProfile(teamId) {
@@ -5775,7 +5879,7 @@ async showTeamSquad(teamId) {
         const value = this.calcPlayerValue(player);
         
         // Buscar estatísticas do jogador (normalizar tipo para comparação segura)
-        const playerStatsData = this.playerStats.filter(s => String(s.playerId) === String(playerId));
+        const playerStatsData = this.playerStats.filter(s => String(s.playerId) === String(playerId)).sort((a, b) => a.year - b.year);
         
         let statsHTML = '';
         if (playerStatsData.length > 0) {
@@ -6264,8 +6368,8 @@ ${statsHTML}`;
                     const newPlayer = {
                         id: saved.id,
                         name: saved.name || 'Jogador ' + saved.id,
-                        rating: saved.rating || 0,
-                        ratingPotential: saved.ratingPotential || 0,
+                        rating: Math.round(saved.rating || 0),
+                        ratingPotential: Math.round(saved.ratingPotential || 0),
                         clubId: saved.clubId || null,
                         countryId: saved.countryId || null,
                         role: saved.role || 0,

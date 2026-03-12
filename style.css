@@ -4,7 +4,7 @@
     padding: 0;
     box-sizing: border-box;
     border: none;
-    font-family: 'Archivo', sans-serif;
+    font-family: 'archivo', sans-serif;
     font-weight: bold;
     font-size: 11px;
 }
@@ -388,6 +388,24 @@ button:active {
     padding: 1px;
 }
 
+.matches-list > div:nth-child(even) .match,
+.group-matches-container > div:nth-child(even) .match {
+    background: #e6e6e6;
+}
+
+.matches-list > div:nth-child(odd) .match,
+.group-matches-container > div:nth-child(odd) .match {
+    background: #d6d6d6;
+}
+
+.playoff-round > .playoff-match:nth-child(even) .match {
+    background: #e6e6e6;
+}
+
+.playoff-round > .playoff-match:nth-child(odd) .match {
+    background: #d6d6d6;
+}
+
 .team-home {
     text-align: right;
 }
@@ -408,8 +426,8 @@ button:active {
 }
 
 .logo-wrap {
-    width: 21px;
-    height: 21px;
+    width: 20.5px;
+    height: 20.5px;
     background-color: white;
     border-radius: 50%;
     display: inline-flex;

@@ -4298,7 +4298,6 @@ if (hasUncompletedFeeders) return;
                 const savedType = document.getElementById("viewCompetitionType")?.value;
                 const savedCompetition = document.getElementById("viewCompetition")?.value;
                 const savedStage = document.getElementById("viewStage")?.value;
-                const savedRound = document.getElementById("viewRound")?.value;
 
                 const preview = this.buildCurrentSeasonPreview();
                 if (preview && preview.competitions.length > 0) {
@@ -4307,49 +4306,60 @@ if (hasUncompletedFeeders) return;
                     const seasonSelector = document.getElementById("viewSeason");
                     if (seasonSelector) {
                         seasonSelector.value = 'current';
-                        this.viewSeason('current');
                     }
 
-                    // Restore saved selections if they are still valid
-                    const countrySelect = document.getElementById("viewCountry");
-                    if (savedCountry && countrySelect) {
-                        const countryOption = Array.from(countrySelect.options).find(o => o.value === savedCountry);
-                        if (countryOption) {
-                            countrySelect.value = savedCountry;
-                            this.onViewCountryChange();
+                    // If we had a saved selection, restore it directly without triggering viewSeason's auto-select
+                    if (savedCompetition && savedStage) {
+                        // Rebuild country/type/competition selects without auto-rendering
+                        const seasonData = this.currentSeasonPreview;
+                        this.currentSeason = this.seasonHistory.length + 1;
+                        this.updateViewCountrySelect(seasonData);
+                        
+                        const countrySelect = document.getElementById("viewCountry");
+                        if (savedCountry && countrySelect) {
+                            const countryOption = Array.from(countrySelect.options).find(o => o.value === savedCountry);
+                            if (countryOption) countrySelect.value = savedCountry;
                         }
-                    }
-                    const typeSelect = document.getElementById("viewCompetitionType");
-                    if (savedType && typeSelect) {
-                        const typeOption = Array.from(typeSelect.options).find(o => o.value === savedType);
-                        if (typeOption) {
-                            typeSelect.value = savedType;
-                            this.viewCompetitionsByFilters();
+                        
+                        this.updateViewCompetitionTypeSelect(seasonData);
+                        const typeSelect = document.getElementById("viewCompetitionType");
+                        if (savedType && typeSelect) {
+                            const typeOption = Array.from(typeSelect.options).find(o => o.value === savedType);
+                            if (typeOption) typeSelect.value = savedType;
                         }
-                    }
-                    const competitionSelect = document.getElementById("viewCompetition");
-                    if (savedCompetition && competitionSelect) {
+                        
+                        // Build competition list without auto-selecting
+                        const viewCountryId = document.getElementById("viewCountry").value;
+                        const viewType = document.getElementById("viewCompetitionType").value;
+                        let filteredCompetitions = seasonData.competitions;
+                        if (viewCountryId) filteredCompetitions = filteredCompetitions.filter(c => c.competition.countryId === viewCountryId);
+                        if (viewType !== "" && viewType !== null) filteredCompetitions = filteredCompetitions.filter(c => c.competition.type === parseInt(viewType));
+                        this.updateCompetitionSelectFiltered(filteredCompetitions);
+                        
+                        const competitionSelect = document.getElementById("viewCompetition");
                         const compOption = Array.from(competitionSelect.options).find(o => o.value === savedCompetition);
                         if (compOption) {
                             competitionSelect.value = savedCompetition;
-                            this.viewCompetition();
+                            // Set up competition data + stage select without rendering stage
+                            const competitionData = seasonData.competitions.find(c => c.competition.id === savedCompetition);
+                            if (competitionData) {
+                                this.currentCompetition = competitionData;
+                                this.updateStageSelect(competitionData);
+                                
+                                const stageSelect = document.getElementById("viewStage");
+                                const stageOption = Array.from(stageSelect.options).find(o => o.value === savedStage);
+                                if (stageOption) {
+                                    stageSelect.value = savedStage;
+                                    await this.viewStage();
+                                }
+                            }
+                        } else {
+                            // Saved competition no longer valid, fall back to normal view
+                            this.viewSeason('current');
                         }
-                    }
-                    const stageSelect = document.getElementById("viewStage");
-                    if (savedStage && stageSelect) {
-                        const stageOption = Array.from(stageSelect.options).find(o => o.value === savedStage);
-                        if (stageOption) {
-                            stageSelect.value = savedStage;
-                            this.viewStage();
-                        }
-                    }
-                    const roundSelect = document.getElementById("viewRound");
-                    if (savedRound && roundSelect) {
-                        const roundOption = Array.from(roundSelect.options).find(o => o.value === savedRound);
-                        if (roundOption) {
-                            roundSelect.value = savedRound;
-                            this.viewRound();
-                        }
+                    } else {
+                        // No prior selection, do normal viewSeason
+                        this.viewSeason('current');
                     }
                 }
             } catch (previewErr) {
@@ -4798,7 +4808,7 @@ competitionTypeNames: {
         document.getElementById("viewPlayoffBtn").style.display = 'none';
     },
 
-    viewCompetition() {
+    async viewCompetition(autoRenderStage = true) {
         const competitionId = document.getElementById("viewCompetition").value;
         if (!competitionId) return;
         
@@ -4809,7 +4819,9 @@ competitionTypeNames: {
         
         this.currentCompetition = competitionData;
         this.updateStageSelect(competitionData);
-        this.viewStage();
+        if (autoRenderStage) {
+            await this.viewStage();
+        }
     },
 
     updateStageSelect(competitionData) {
@@ -4874,8 +4886,14 @@ competitionTypeNames: {
         this.updateGroupDisplay();
         this.updateRoundSelect();
         
-        await this.displayStandings("seasonStandings");
-        await this.displayRoundMatches(1, "seasonMatches");
+        const lastRound = this.getLastPlayedRound();
+        const roundSelector = document.getElementById("viewRound");
+        if (lastRound > 0 && roundSelector) {
+            roundSelector.value = lastRound;
+        }
+        
+        await this.displayStandingsUpToRound(lastRound > 0 ? lastRound : null);
+        await this.displayRoundMatches(lastRound > 0 ? lastRound : 1, "seasonMatches");
         
         document.getElementById("seasonStandings").style.display = 'block';
         document.getElementById("seasonMatches").style.display = 'block';
@@ -4893,12 +4911,34 @@ competitionTypeNames: {
         
         this.updateRoundSelect();
         
-        await this.displayStandings("seasonStandings");
-        await this.displayRoundMatches(1, "seasonMatches");
+        const lastRound = this.getLastPlayedRound();
+        const roundSelector = document.getElementById("viewRound");
+        if (lastRound > 0 && roundSelector) {
+            roundSelector.value = lastRound;
+        }
+        
+        await this.displayStandingsUpToRound(lastRound > 0 ? lastRound : null);
+        await this.displayRoundMatches(lastRound > 0 ? lastRound : 1, "seasonMatches");
         
         document.getElementById("seasonStandings").style.display = 'block';
         document.getElementById("seasonMatches").style.display = 'block';
         document.getElementById("playoffBracket").style.display = 'none';
+    },
+
+    getLastPlayedRound() {
+        // For groups, check the first group's schedule
+        const schedule = (this.currentGroups.length > 0 && this.currentGroups[this.currentGroupIndex])
+            ? this.currentGroups[this.currentGroupIndex].schedule
+            : this.schedule;
+        if (!schedule || schedule.length === 0) return 0;
+        let lastPlayed = 0;
+        for (let i = 0; i < schedule.length; i++) {
+            const roundMatches = schedule[i];
+            if (roundMatches && roundMatches.some(m => m.played)) {
+                lastPlayed = i + 1;
+            }
+        }
+        return lastPlayed;
     },
 
     updateRoundSelect() {
@@ -6056,786 +6096,34 @@ ${statsHTML}`;
     },
 
     // =============================================
-    // === SISTEMA DE SAVE/LOAD BINÁRIO (.bin) ===
+    // === DELEGATES PARA SaveManager ===
     // =============================================
 
-    SAVE_MAGIC: [0x46, 0x42, 0x53, 0x56], // "FBSV"
-    SAVE_VERSION: 2,
+    get _activeSaveSlot() { return SaveManager._activeSaveSlot; },
+    set _activeSaveSlot(v) { SaveManager._activeSaveSlot = v; },
 
-    // Helper: Convert Map to serializable object
-    _mapToObj(map) {
-        if (!map || !(map instanceof Map)) return {};
-        const obj = {};
-        map.forEach((v, k) => { obj[k] = v; });
-        return obj;
-    },
-
-    // Helper: Convert Set to array
-    _setToArr(set) {
-        if (!set || !(set instanceof Set)) return [];
-        return Array.from(set);
-    },
-
-    // Serialize seasonState Maps/Sets to plain objects for JSON compatibility
-    _serializeSeasonState(ss) {
-        const clone = {};
-        clone.currentWeek = ss.currentWeek;
-        clone.totalWeeks = ss.totalWeeks;
-        clone.seasonComplete = ss.seasonComplete;
-        clone.weeklyPlan = JSON.parse(JSON.stringify(ss.weeklyPlan || []));
-        clone.allCompetitions = JSON.parse(JSON.stringify(ss.allCompetitions || []));
-        clone.seasonResult = JSON.parse(JSON.stringify(ss.seasonResult || {}));
-
-        clone.stageWindows = this._mapToObj(ss.stageWindows);
-        clone.stageStatus = this._mapToObj(ss.stageStatus);
-
-        clone.qualifiedTeams = {};
-        if (ss.qualifiedTeams instanceof Map) {
-            ss.qualifiedTeams.forEach((teams, k) => {
-                clone.qualifiedTeams[k] = JSON.parse(JSON.stringify(teams || []));
-            });
-        }
-        clone.crossQualified = {};
-        if (ss.crossQualified instanceof Map) {
-            ss.crossQualified.forEach((teams, k) => {
-                clone.crossQualified[k] = JSON.parse(JSON.stringify(teams || []));
-            });
-        }
-
-        clone.completedStages = this._setToArr(ss.completedStages);
-
-        // stageSchedules: Map → obj, with nested Maps serialized via replacer
-        clone.stageSchedules = {};
-        if (ss.stageSchedules instanceof Map) {
-            ss.stageSchedules.forEach((data, stageId) => {
-                clone.stageSchedules[stageId] = JSON.parse(JSON.stringify(data, (key, value) => {
-                    if (value instanceof Map) return { __type: 'Map', entries: Array.from(value.entries()) };
-                    if (value instanceof Set) return { __type: 'Set', values: Array.from(value) };
-                    return value;
-                }));
-            });
-        }
-
-        clone.sharedStageResults = {};
-        if (ss.sharedStageResults instanceof Map) {
-            ss.sharedStageResults.forEach((val, k) => {
-                clone.sharedStageResults[k] = JSON.parse(JSON.stringify(val || {}));
-            });
-        }
-
-        clone.competitionResults = {};
-        if (ss.competitionResults instanceof Map) {
-            ss.competitionResults.forEach((val, k) => {
-                clone.competitionResults[k] = JSON.parse(JSON.stringify(val || {}));
-            });
-        }
-
-        clone.competitionStagesMap = {};
-        if (ss.competitionStagesMap instanceof Map) {
-            ss.competitionStagesMap.forEach((val, k) => {
-                clone.competitionStagesMap[k] = JSON.parse(JSON.stringify(val || []));
-            });
-        }
-
-        return clone;
-    },
-
-    // Deserialize plain objects back to Maps/Sets for seasonState
-    _deserializeSeasonState(raw) {
-        const ss = {};
-        ss.currentWeek = raw.currentWeek || 0;
-        ss.totalWeeks = raw.totalWeeks || 52;
-        ss.seasonComplete = !!raw.seasonComplete;
-        ss.weeklyPlan = raw.weeklyPlan || [];
-        ss.allCompetitions = raw.allCompetitions || [];
-        ss.seasonResult = raw.seasonResult || {};
-
-        ss.stageWindows = new Map(Object.entries(raw.stageWindows || {}));
-        ss.stageStatus = new Map(Object.entries(raw.stageStatus || {}));
-        ss.qualifiedTeams = new Map(Object.entries(raw.qualifiedTeams || {}));
-        ss.crossQualified = new Map(Object.entries(raw.crossQualified || {}));
-        ss.completedStages = new Set(raw.completedStages || []);
-        ss.sharedStageResults = new Map(Object.entries(raw.sharedStageResults || {}));
-        ss.competitionResults = new Map(Object.entries(raw.competitionResults || {}));
-        ss.competitionStagesMap = new Map(Object.entries(raw.competitionStagesMap || {}));
-
-        // Reconstruct stageSchedules with nested Maps/Sets
-        const reviver = (obj) => {
-            if (obj && typeof obj === 'object') {
-                if (obj.__type === 'Map' && Array.isArray(obj.entries)) {
-                    return new Map(obj.entries.map(([k, v]) => [k, reviver(v)]));
-                }
-                if (obj.__type === 'Set' && Array.isArray(obj.values)) {
-                    return new Set(obj.values.map(v => reviver(v)));
-                }
-                if (Array.isArray(obj)) return obj.map(v => reviver(v));
-                const result = {};
-                for (const key of Object.keys(obj)) result[key] = reviver(obj[key]);
-                return result;
-            }
-            return obj;
-        };
-        ss.stageSchedules = new Map();
-        Object.entries(raw.stageSchedules || {}).forEach(([stageId, data]) => {
-            ss.stageSchedules.set(stageId, reviver(data));
-        });
-
-        return ss;
-    },
-
-    // FIX: Rebuild Map references in stageSchedules so Map values point to the same objects as array entries.
-    // Without this, after JSON deserialization, playMatch updates Maps but arrays stay stale.
-    _rebuildStageScheduleRefs(seasonState) {
-        if (!seasonState || !seasonState.stageSchedules) return;
-        seasonState.stageSchedules.forEach((data, stageId) => {
-            // Rebuild clubsStatsMap from clubsStats array
-            if (data.clubsStats && Array.isArray(data.clubsStats)) {
-                data.clubsStatsMap = new Map(data.clubsStats.map(s => [s.id, s]));
-            }
-            // Rebuild standingsMapRef from standingsRef
-            if (data.standingsRef && Array.isArray(data.standingsRef)) {
-                data.standingsMapRef = new Map(data.standingsRef.map(s => [s.id, s]));
-            }
-            // Rebuild group-level refs
-            if (data.groups && Array.isArray(data.groups)) {
-                data.groups.forEach(g => {
-                    if (g.standingsRef && Array.isArray(g.standingsRef)) {
-                        g.standingsMapRef = new Map(g.standingsRef.map(s => [s.id, s]));
-                    }
-                });
-            }
-        });
-    },
-
-    // Extrai estado serializável — salva TUDO (exceto dados fixos: playerFicticiousNames, countries, continents, playerYouthReveal, competitionStageAwards)
-    getSerializableState() {
-        // Clubs: apenas dados mutáveis (nome, país, estádio, etc. vêm do DB e não mudam)
-        const clubs = this.clubs.map(c => ({
-            id: c.id,
-            rating: c.rating,
-            transferBalance: c.transferBalance,
-            youth: c.youth,
-            formation: c.formation || null,
-            competitions: c.competitions ? [...c.competitions] : [],
-            stages: c.stages ? [...c.stages] : [],
-            originalCompetitions: c.originalCompetitions ? [...c.originalCompetitions] : [],
-            originalStages: c.originalStages ? [...c.originalStages] : []
-        }));
-
-        // Players: dados mutáveis + identificação mínima para jogadores gerados
-        const players = this.players.map(p => {
-            const obj = {
-                id: p.id,
-                rating: p.rating != null ? p.rating : 0,
-                ratingPotential: p.ratingPotential != null ? p.ratingPotential : 0,
-                clubId: p.clubId || null,
-                role: p.role || 0,
-                dob: p.dob || 20000101
-            };
-            // Salvar nome/país/originalClubId apenas para jogadores gerados (youth)
-            // que não existem no DB original
-            if (p._generated) {
-                obj.name = p.name;
-                obj.countryId = p.countryId;
-                obj.originalClubId = p.originalClubId;
-                obj._generated = true;
-            }
-            return obj;
-        });
-
-        // teamTitles: Map → object
-        const titles = {};
-        if (this.teamTitles && this.teamTitles.forEach) {
-            this.teamTitles.forEach((val, key) => {
-                if (!key) return;
-                const champs = {};
-                if (val && val.championships && val.championships.forEach) {
-                    val.championships.forEach((count, compId) => {
-                        if (compId != null) champs[compId] = count || 0;
-                    });
-                }
-                titles[key] = champs;
-            });
-        }
-
-        // clubFormations: Map → object
-        const formations = {};
-        if (this.clubFormations && this.clubFormations.forEach) {
-            this.clubFormations.forEach((val, key) => {
-                if (key != null) formations[key] = val;
-            });
-        }
-
-        // nextSeasonInjections: Map → object (salva IDs dos clubs)
-        const injections = {};
-        if (this.nextSeasonInjections && this.nextSeasonInjections.forEach) {
-            this.nextSeasonInjections.forEach((clubList, stageId) => {
-                if (stageId != null && Array.isArray(clubList)) {
-                    injections[stageId] = clubList.filter(c => c && c.id).map(c => c.id);
-                }
-            });
-        }
-
-        // teamTrajectories: Map → object
-        const trajectories = {};
-        if (this.teamTrajectories && this.teamTrajectories.forEach) {
-            this.teamTrajectories.forEach((arr, teamId) => {
-                if (teamId != null) trajectories[teamId] = arr;
-            });
-        }
-
-        // seasonHistory: salva como está (já purgado)
-        const history = JSON.parse(JSON.stringify(this.seasonHistory || []));
-
-        // playerStats: salva como está (sem isTransfer)
-        const stats = JSON.parse(JSON.stringify(this.playerStats || []));
-
-        // Estado da temporada em progresso
-        let weeklyState = null;
-        if (this.seasonInProgress && this.seasonState) {
-            weeklyState = this._serializeSeasonState(this.seasonState);
-        }
-
-        return {
-            clubs, players, titles, formations, injections, trajectories, history, stats,
-            currentSeason: this.currentSeason || 0,
-            seasonInProgress: !!this.seasonInProgress,
-            weeklyState,
-            standings: JSON.parse(JSON.stringify(this.standings || [])),
-            schedule: JSON.parse(JSON.stringify(this.schedule || [])),
-            playoffBracket: JSON.parse(JSON.stringify(this.playoffBracket || [])),
-            currentGroups: JSON.parse(JSON.stringify(this.currentGroups || [])),
-            currentGroupIndex: this.currentGroupIndex || 0,
-            currentDivisions: JSON.parse(JSON.stringify(this.currentDivisions || [])),
-            currentDivisionIndex: this.currentDivisionIndex || 0,
-            currentCompetition: this.currentCompetition ? JSON.parse(JSON.stringify(this.currentCompetition)) : null,
-            currentStage: this.currentStage ? JSON.parse(JSON.stringify(this.currentStage)) : null,
-            currentSeasonPreview: this.currentSeasonPreview ? JSON.parse(JSON.stringify(this.currentSeasonPreview)) : null,
-            saveVersion: 2
-        };
-    },
-
-    // Restaurar estado a partir de dados desserializados
-    restoreState(state) {
-        // Restaurar clubs — apenas dados mutáveis, nunca sobrescrever dados fixos do DB
-        if (state.clubs) {
-            const clubMap = new Map(this.clubs.map(c => [c.id, c]));
-            state.clubs.forEach(saved => {
-                if (!saved || !saved.id) return;
-                const club = clubMap.get(saved.id);
-                if (!club) return; // Club não existe no DB, ignorar
-                // Apenas atualizar campos que mudam durante simulação
-                if (saved.rating != null) club.rating = saved.rating;
-                if (saved.transferBalance != null) club.transferBalance = saved.transferBalance;
-                if (saved.youth != null) club.youth = saved.youth;
-                if (saved.formation != null) club.formation = saved.formation;
-                if (Array.isArray(saved.competitions) && saved.competitions.length > 0) club.competitions = saved.competitions;
-                if (Array.isArray(saved.stages) && saved.stages.length > 0) club.stages = saved.stages;
-                if (Array.isArray(saved.originalCompetitions) && saved.originalCompetitions.length > 0) {
-                    club.originalCompetitions = saved.originalCompetitions;
-                } else if (Array.isArray(saved.competitions) && saved.competitions.length > 0) {
-                    club.originalCompetitions = saved.competitions;
-                }
-                if (Array.isArray(saved.originalStages) && saved.originalStages.length > 0) {
-                    club.originalStages = saved.originalStages;
-                } else if (Array.isArray(saved.stages) && saved.stages.length > 0) {
-                    club.originalStages = saved.stages;
-                }
-            });
-        }
-
-        // Restaurar players — apenas dados mutáveis, preservar nome/país do DB
-        // Jogadores aposentados são excluídos permanentemente
-        if (state.players) {
-            const savedIds = new Set(state.players.map(s => s.id));
-            // Remover jogadores do DB que não estão no save (foram aposentados/removidos)
-            this.players = this.players.filter(p => savedIds.has(p.id));
-            const playerMap = new Map(this.players.map(p => [p.id, p]));
-            
-            state.players.forEach(saved => {
-                if (!saved || !saved.id) return;
-                let player = playerMap.get(saved.id);
-                if (player) {
-                    // Apenas atualizar campos mutáveis, nunca sobrescrever nome/país/originalClubId do DB
-                    if (saved.rating != null) player.rating = saved.rating;
-                    if (saved.ratingPotential != null) player.ratingPotential = saved.ratingPotential;
-                    player.clubId = saved.clubId || null;
-                    if (saved.role != null) player.role = saved.role;
-                    if (saved.dob != null) player.dob = saved.dob;
-                    
-                } else if (saved._generated) {
-                    // Jogador gerado (youth/fictício) que não existe no DB — criar completo
-                    const newPlayer = {
-                        id: saved.id,
-                        name: saved.name || 'Jogador ' + saved.id,
-                        rating: Math.round(saved.rating || 0),
-                        ratingPotential: Math.round(saved.ratingPotential || 0),
-                        clubId: saved.clubId || null,
-                        countryId: saved.countryId || null,
-                        role: saved.role || 0,
-                        dob: saved.dob || 20000101,
-                        
-                        originalClubId: saved.originalClubId || null,
-                        _generated: true
-                    };
-                    this.players.push(newPlayer);
-                }
-            });
-        }
-
-        // Restaurar teamTitles
-        if (state.titles) {
-            this.teamTitles = new Map();
-            Object.entries(state.titles).forEach(([clubId, champs]) => {
-                const championships = new Map();
-                Object.entries(champs).forEach(([compId, count]) => {
-                    championships.set(compId, count);
-                });
-                this.teamTitles.set(clubId, { championships });
-            });
-        }
-
-        // Restaurar teamTrajectories
-        if (state.trajectories) {
-            this.teamTrajectories = new Map();
-            Object.entries(state.trajectories).forEach(([teamId, arr]) => {
-                this.teamTrajectories.set(teamId, arr);
-            });
-        }
-
-        // Restaurar clubFormations
-        if (state.formations) {
-            this.clubFormations = new Map();
-            Object.entries(state.formations).forEach(([key, val]) => {
-                this.clubFormations.set(key, val);
-            });
-        }
-
-        // Restaurar nextSeasonInjections
-        if (state.injections) {
-            this.nextSeasonInjections = new Map();
-            Object.entries(state.injections).forEach(([stageId, clubIds]) => {
-                const clubs = clubIds.map(id => this.clubs.find(c => c.id === id)).filter(Boolean);
-                if (clubs.length > 0) this.nextSeasonInjections.set(stageId, clubs);
-            });
-        }
-
-        // Restaurar playerStats como está
-        if (state.stats) {
-            this.playerStats = state.stats;
-        }
-
-        // Restaurar seasonHistory como está
-        if (state.history) {
-            this.seasonHistory = state.history;
-        }
-
-        this.currentSeason = state.currentSeason || this.seasonHistory.length;
-
-        // rejectedOffers não são mais usados
-        this.rejectedOffers = [];
-
-        // Restaurar estado de simulação
-        if (state.seasonInProgress && state.weeklyState) {
-            this.seasonState = this._deserializeSeasonState(state.weeklyState);
-            this.seasonInProgress = true;
-            // FIX: Rebuild Map references so they point to the SAME objects as the arrays
-            // After JSON serialization/deserialization, Map values and array entries are disconnected copies.
-            // playMatch updates via Maps, but standings arrays wouldn't reflect those changes without this fix.
-            this._rebuildStageScheduleRefs(this.seasonState);
-        } else {
-            this.seasonState = null;
-            this.seasonInProgress = false;
-        }
-        this.currentSeasonPreview = state.currentSeasonPreview || null;
-        this.standings = state.standings || [];
-        this.schedule = state.schedule || [];
-        this.playoffBracket = state.playoffBracket || [];
-        this.currentGroups = state.currentGroups || [];
-        this.currentGroupIndex = state.currentGroupIndex || 0;
-        this.currentDivisions = state.currentDivisions || [];
-        this.currentDivisionIndex = state.currentDivisionIndex || 0;
-        this.currentCompetition = state.currentCompetition || null;
-        this.currentStage = state.currentStage || null;
-
-        // Rebuildar caches
-        this.buildClubsMap();
-        this.playersMap = new Map(this.players.map(p => [p.id, p]));
-        this.invalidatePlayerCache();
-
-        // FIX: Rebuild currentSeasonPreview from live seasonState if missing
-        if (this.seasonInProgress && this.seasonState && !this.currentSeasonPreview) {
-            this.currentSeasonPreview = this.buildCurrentSeasonPreview();
-        }
-    },
-
-    // Serializar estado para ArrayBuffer comprimido (.bin)
-    async exportSave() {
-        const state = this.getSerializableState();
-        const json = JSON.stringify(state);
-        const textEncoder = new TextEncoder();
-        const data = textEncoder.encode(json);
-
-        // Header: FBSV (4) + version (2) + seasonCount (4) + uncompressedSize (4) = 14 bytes
-        const header = new ArrayBuffer(14);
-        const headerView = new DataView(header);
-        this.SAVE_MAGIC.forEach((b, i) => headerView.setUint8(i, b));
-        headerView.setUint16(4, this.SAVE_VERSION, true);
-        headerView.setUint32(6, this.seasonHistory.length, true);
-        headerView.setUint32(10, data.byteLength, true);
-
-        // Comprimir com gzip
-        const compressed = await this._compress(data);
-
-        // Juntar header + compressed
-        const result = new Uint8Array(header.byteLength + compressed.byteLength);
-        result.set(new Uint8Array(header), 0);
-        result.set(compressed, header.byteLength);
-
-        return result.buffer;
-    },
-
-    // Desserializar ArrayBuffer (.bin) para estado
-    async importSave(buffer) {
-        const view = new DataView(buffer);
-
-        // Validar magic
-        for (let i = 0; i < 4; i++) {
-            if (view.getUint8(i) !== this.SAVE_MAGIC[i]) {
-                throw new Error('Arquivo .bin inválido: magic bytes incorretos');
-            }
-        }
-
-        const version = view.getUint16(4, true);
-        if (version > this.SAVE_VERSION) {
-            throw new Error(`Versão do save (${version}) não suportada. Atualize o simulador.`);
-        }
-
-        const seasonCount = view.getUint32(6, true);
-        // const uncompressedSize = view.getUint32(10, true); // Para validação futura
-
-        // Dados comprimidos começam no byte 14
-        const compressed = new Uint8Array(buffer, 14);
-        const decompressed = await this._decompress(compressed);
-
-        const textDecoder = new TextDecoder();
-        const json = textDecoder.decode(decompressed);
-        const state = JSON.parse(json);
-
-        return { state, seasonCount, version };
-    },
-
-    async _compress(data) {
-        if (typeof CompressionStream !== 'undefined') {
-            const cs = new CompressionStream('gzip');
-            const writer = cs.writable.getWriter();
-            writer.write(data);
-            writer.close();
-            const reader = cs.readable.getReader();
-            const chunks = [];
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
-            const totalLength = chunks.reduce((sum, c) => sum + c.byteLength, 0);
-            const result = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-                result.set(chunk, offset);
-                offset += chunk.byteLength;
-            }
-            return result;
-        } else {
-            // Fallback: sem compressão (browsers muito antigos)
-            return data;
-        }
-    },
-
-    async _decompress(data) {
-        if (typeof DecompressionStream !== 'undefined') {
-            const ds = new DecompressionStream('gzip');
-            const writer = ds.writable.getWriter();
-            writer.write(data);
-            writer.close();
-            const reader = ds.readable.getReader();
-            const chunks = [];
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
-            const totalLength = chunks.reduce((sum, c) => sum + c.byteLength, 0);
-            const result = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-                result.set(chunk, offset);
-                offset += chunk.byteLength;
-            }
-            return result;
-        } else {
-            return data;
-        }
-    },
-
-    _activeSaveSlot: null,
-    IDB_NAME: 'FootballSimSaves',
-    IDB_VERSION: 1,
-    IDB_STORE: 'saves',
-
-    _openIDB() {
-        return new Promise((resolve, reject) => {
-            const req = indexedDB.open(this.IDB_NAME, this.IDB_VERSION);
-            req.onupgradeneeded = () => {
-                const db = req.result;
-                if (!db.objectStoreNames.contains(this.IDB_STORE)) {
-                    db.createObjectStore(this.IDB_STORE, { keyPath: 'id' });
-                }
-            };
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => reject(req.error);
-        });
-    },
-
-    async idbGetAll() {
-        const db = await this._openIDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.IDB_STORE, 'readonly');
-            const store = tx.objectStore(this.IDB_STORE);
-            const req = store.getAll();
-            req.onsuccess = () => resolve(req.result || []);
-            req.onerror = () => reject(req.error);
-        });
-    },
-
-    async idbPut(record) {
-        const db = await this._openIDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.IDB_STORE, 'readwrite');
-            const store = tx.objectStore(this.IDB_STORE);
-            const req = store.put(record);
-            req.onsuccess = () => resolve();
-            req.onerror = () => reject(req.error);
-        });
-    },
-
-    async idbDelete(id) {
-        const db = await this._openIDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(this.IDB_STORE, 'readwrite');
-            const store = tx.objectStore(this.IDB_STORE);
-            const req = store.delete(id);
-            req.onsuccess = () => resolve();
-            req.onerror = () => reject(req.error);
-        });
-    },
-
-    async showSaveSlotModal() {
-        const modal = document.getElementById('saveSlotModal');
-        const list = document.getElementById('saveSlotList');
-        const saves = await this.idbGetAll();
-        list.innerHTML = '';
-        if (saves.length === 0) {
-            list.innerHTML = '<p style="text-align:center;color:#aaa;">Nenhum save encontrado.</p>';
-        } else {
-            saves.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-            saves.forEach(s => {
-                const div = document.createElement('div');
-                div.className = 'save-slot-item';
-                const date = s.updatedAt ? new Date(s.updatedAt).toLocaleString('pt-BR') : 'N/A';
-                const seasonNum = s.season || 0;
-                div.innerHTML = `<div class="slot-info" onclick="App.loadSaveSlot('${s.id}')"><div class="slot-name">${s.name}</div><div class="slot-meta">Temporada ${seasonNum} &bull; ${date}</div></div><button class="slot-delete" onclick="event.stopPropagation();App.deleteSaveSlot('${s.id}')">Excluir</button>`;
-                list.appendChild(div);
-            });
-        }
-        modal.style.display = 'flex';
-    },
-
-    closeSaveSlotModal(skipLoad) {
-        document.getElementById('saveSlotModal').style.display = 'none';
-        if (skipLoad) this._activeSaveSlot = '__none__';
-    },
-
-    async createNewSave() {
-        const name = prompt('Nome do save:');
-        if (!name || !name.trim()) return;
-        const id = 'save_' + Date.now();
-        this._activeSaveSlot = id;
-        await this.idbPut({ id, name: name.trim(), data: null, season: 0, updatedAt: Date.now() });
-        this.closeSaveSlotModal();
-        const progress = document.getElementById('seasonProgress');
-        if (progress) { progress.innerHTML = `<span style="color:#4ade80;">Save "${name.trim()}" criado!</span>`; progress.style.display = 'block'; }
-    },
-
-    async loadSaveSlot(id) {
-        const saves = await this.idbGetAll();
-        const save = saves.find(s => s.id === id);
-        if (!save) { alert('Save não encontrado.'); return; }
-        this._activeSaveSlot = id;
-        this.closeSaveSlotModal();
-        if (save.data) {
-            try {
-                const uint8 = new Uint8Array(save.data);
-                let state;
-                if (uint8[0] === this.SAVE_MAGIC[0] && uint8[1] === this.SAVE_MAGIC[1] &&
-                    uint8[2] === this.SAVE_MAGIC[2] && uint8[3] === this.SAVE_MAGIC[3]) {
-                    const imported = await this.importSave(save.data.buffer || save.data);
-                    state = imported.state;
-                } else {
-                    state = JSON.parse(new TextDecoder().decode(uint8));
-                }
-                this.restoreState(state);
-                this.updateSeasonSelects();
-                if (this.seasonHistory.length > 0) {
-                    document.getElementById("viewSeason").value = this.seasonHistory.length;
-                    this.viewSeason(this.seasonHistory.length);
-                }
-                if (this.seasonInProgress && this.seasonState) {
-                    // FIX: Rebuild preview if missing after load
-                    if (!this.currentSeasonPreview) {
-                        this.currentSeasonPreview = this.buildCurrentSeasonPreview();
-                    }
-                    this.updateWeekUI();
-                    this.updateSeasonSelectsWithPreview();
-                    // FIX: Auto-select and show current season results
-                    if (this.currentSeasonPreview && this.currentSeasonPreview.competitions.length > 0) {
-                        const seasonSelector = document.getElementById("viewSeason");
-                        if (seasonSelector) {
-                            seasonSelector.value = 'current';
-                            this.viewSeason('current');
-                        }
-                    }
-                }
-                const progress = document.getElementById('seasonProgress');
-                if (progress) { progress.innerHTML = `<span style="color:#4ade80;">✅ Save "${save.name}" carregado!</span>`; progress.style.display = 'block'; }
-            } catch (e) {
-                console.error('Erro ao carregar save:', e);
-                alert('Erro ao carregar este save.');
-            }
-        } else {
-            const progress = document.getElementById('seasonProgress');
-            if (progress) { progress.innerHTML = `<span style="color:#4ade80;">Save "${save.name}" selecionado (vazio).</span>`; progress.style.display = 'block'; }
-        }
-    },
-
+    getSerializableState() { return SaveManager.getSerializableState(this); },
+    restoreState(state) { return SaveManager.restoreState(this, state); },
+    async exportSave() { return SaveManager.exportSave(this); },
+    async importSave(buffer) { return SaveManager.importSave(buffer); },
+    async showSaveSlotModal() { return SaveManager.showSaveSlotModal(this); },
+    closeSaveSlotModal(skip) { return SaveManager.closeSaveSlotModal(skip); },
+    async createNewSave() { return SaveManager.createNewSave(this); },
+    async loadSaveSlot(id) { return SaveManager.loadSaveSlot(this, id); },
     async deleteSaveSlot(id) {
-        if (!confirm('Excluir este save permanentemente?')) return;
-        await this.idbDelete(id);
-        if (this._activeSaveSlot === id) this._activeSaveSlot = null;
+        await SaveManager.deleteSaveSlot(id);
         this.showSaveSlotModal();
     },
-
-    async saveToIDB() {
-        if (!this._activeSaveSlot || this._activeSaveSlot === '__none__') {
-            const name = prompt('Nome do save:');
-            if (!name || !name.trim()) return;
-            this._activeSaveSlot = 'save_' + Date.now();
-            const buf = await this.exportSave();
-            await this.idbPut({ id: this._activeSaveSlot, name: name.trim(), data: new Uint8Array(buf), season: this.currentSeason, updatedAt: Date.now() });
-        } else {
-            const saves = await this.idbGetAll();
-            const existing = saves.find(s => s.id === this._activeSaveSlot);
-            const buf = await this.exportSave();
-            await this.idbPut({ id: this._activeSaveSlot, name: existing ? existing.name : 'Save', data: new Uint8Array(buf), season: this.currentSeason, updatedAt: Date.now() });
-        }
-        const progress = document.getElementById('seasonProgress');
-        if (progress) { progress.innerHTML = `<span style="color:#4ade80;">✅ Salvo com sucesso!</span>`; progress.style.display = 'block'; }
-    },
-
-    async downloadSave() {
-        try {
-            const buf = await this.exportSave();
-            const blob = new Blob([buf], { type: 'application/octet-stream' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `Save${this.currentSeason}.bin`;
-            a.click();
-            URL.revokeObjectURL(url);
-        } catch (e) {
-            console.error("Erro ao baixar backup:", e);
-            alert("Erro ao gerar ficheiro de backup.");
-        }
-    },
-
-    async uploadSave(file) {
-        try {
-            const button = document.getElementById('loadProgressBtn');
-            button.disabled = true;
-            const arrayBuffer = await file.arrayBuffer();
-            const uint8 = new Uint8Array(arrayBuffer);
-            let state;
-            if (uint8[0] === this.SAVE_MAGIC[0] && uint8[1] === this.SAVE_MAGIC[1] &&
-                uint8[2] === this.SAVE_MAGIC[2] && uint8[3] === this.SAVE_MAGIC[3]) {
-                const imported = await this.importSave(arrayBuffer);
-                state = imported.state;
-            } else {
-                let jsonString;
-                if (uint8[0] === 0x1f && uint8[1] === 0x8b) {
-                    const ds = new DecompressionStream('gzip');
-                    const writer = ds.writable.getWriter();
-                    writer.write(arrayBuffer);
-                    writer.close();
-                    const decompressedBuffer = await new Response(ds.readable).arrayBuffer();
-                    jsonString = new TextDecoder().decode(decompressedBuffer);
-                } else {
-                    jsonString = new TextDecoder().decode(arrayBuffer);
-                }
-                state = JSON.parse(jsonString);
-            }
-            this.restoreState(state);
-            this.updateSeasonSelects();
-            if (this.seasonHistory.length > 0) {
-                document.getElementById("viewSeason").value = this.seasonHistory.length;
-                this.viewSeason(this.seasonHistory.length);
-            }
-            if (this.seasonInProgress && this.seasonState) {
-                if (!this.currentSeasonPreview) {
-                    this.currentSeasonPreview = this.buildCurrentSeasonPreview();
-                }
-                this.updateWeekUI();
-                this.updateSeasonSelectsWithPreview();
-                if (this.currentSeasonPreview && this.currentSeasonPreview.competitions.length > 0) {
-                    const seasonSelector = document.getElementById("viewSeason");
-                    if (seasonSelector) {
-                        seasonSelector.value = 'current';
-                        this.viewSeason('current');
-                    }
-                }
-            }
-            if (this._activeSaveSlot && this._activeSaveSlot !== '__none__') {
-                const saves = await this.idbGetAll();
-                const existing = saves.find(s => s.id === this._activeSaveSlot);
-                const buf = await this.exportSave();
-                await this.idbPut({ id: this._activeSaveSlot, name: existing ? existing.name : 'Backup importado', data: new Uint8Array(buf), season: this.currentSeason, updatedAt: Date.now() });
-            }
-            const progress = document.getElementById("seasonProgress");
-            if (progress) { progress.innerHTML = `<span style="color:#4ade80;">✅ Backup carregado com sucesso!</span>`; progress.style.display = 'block'; }
-        } catch (e) {
-            console.error('Erro no Upload:', e);
-            alert('Este ficheiro não é um save válido ou está incompatível.');
-        } finally {
-            document.getElementById('loadProgressBtn').disabled = false;
-        }
-    },
-
-    setupSaveLoadListeners() {
-        const saveBtn = document.getElementById('saveProgressBtn');
-        const downloadBtn = document.getElementById('downloadBackupBtn');
-        const loadBtn = document.getElementById('loadProgressBtn');
-        const fileInput = document.getElementById('loadFileInput');
-
-        if (saveBtn) saveBtn.addEventListener('click', () => this.saveToIDB());
-        if (downloadBtn) downloadBtn.addEventListener('click', () => this.downloadSave());
-        if (loadBtn) loadBtn.addEventListener('click', () => fileInput.click());
-        if (fileInput) fileInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (file) {
-                this.uploadSave(file);
-                fileInput.value = '';
-            }
-        });
-    }
+    async saveToIDB() { return SaveManager.saveToIDB(this); },
+    async downloadSave() { return SaveManager.downloadSave(this); },
+    async uploadSave(file) { return SaveManager.uploadSave(this, file); },
+    setupSaveLoadListeners() { return SaveManager.setupSaveLoadListeners(this); },
     };
 
-document.addEventListener("DOMContentLoaded", () => App.init());
+document.addEventListener("DOMContentLoaded", () => {
+    // Carregar save-manager.js antes de iniciar
+    const script = document.createElement('script');
+    script.src = 'save-manager.js';
+    script.onload = () => App.init();
+    document.head.appendChild(script);
+});

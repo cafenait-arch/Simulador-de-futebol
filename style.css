@@ -4,9 +4,10 @@
     padding: 0;
     box-sizing: border-box;
     border: none;
-    font-family: 'archivo', sans-serif;
+    font-family: 'Roboto';
+    font-size: 10px;
     font-weight: bold;
-    font-size: 11px;
+    text-transform: uppercase;
 }
 
 /* Base */
@@ -415,10 +416,10 @@ button:active {
 }
 
 .score {
+    font-family: 'archivo';
     text-align: center;
     font-weight: 700;
-    padding: 2px;
-    border-radius: 4px;
+    font-size: 11px;
 }
 
 .team-name {
@@ -426,9 +427,6 @@ button:active {
 }
 
 .logo-wrap {
-    width: 20.5px;
-    height: 20.5px;
-    background-color: white;
     border-radius: 50%;
     display: inline-flex;
     align-items: center;
@@ -437,8 +435,8 @@ button:active {
 }
 
 .logo {
-    width: 15px;
-    height: 15px;
+    width: 18px;
+    height: 18px;
     display: inline-block;
     vertical-align: middle;
 }

@@ -30,26 +30,26 @@ const App = {
     TOTAL_WEEKS: 52,         // Minimum weeks in a season (dynamically expanded based on competition needs)
     
 YOUTH_LAMBDA_TABLE: {
-    1: { rating: 38, potential: 2 },
-    2: { rating: 39, potential: 2 },
-    3: { rating: 40, potential: 2 },
-    4: { rating: 41, potential: 3 },
-    5: { rating: 43, potential: 4 },
-    6: { rating: 44, potential: 5 },
-    7: { rating: 46, potential: 6 },
-    8: { rating: 47, potential: 7 },
-    9: { rating: 49, potential: 8 },
-    10: { rating: 50, potential: 9 },
-    11: { rating: 52, potential: 10 },
-    12: { rating: 54, potential: 11 },
-    13: { rating: 56, potential: 12 },
-    14: { rating: 58, potential: 13 },
-    15: { rating: 60, potential: 14 },
-    16: { rating: 62, potential: 15 },
-    17: { rating: 64, potential: 16 },
-    18: { rating: 65, potential: 15 },
-    19: { rating: 67, potential: 16 },
-    20: { rating: 68, potential: 17 }
+    1: { rating: 38, potential: 20 },
+    2: { rating: 39, potential: 20 },
+    3: { rating: 40, potential: 20 },
+    4: { rating: 41, potential: 20 },
+    5: { rating: 43, potential: 20 },
+    6: { rating: 44, potential: 20 },
+    7: { rating: 46, potential: 20 },
+    8: { rating: 47, potential: 20 },
+    9: { rating: 49, potential: 20 },
+    10: { rating: 50, potential: 20 },
+    11: { rating: 52, potential: 20 },
+    12: { rating: 54, potential: 20 },
+    13: { rating: 56, potential: 20 },
+    14: { rating: 58, potential: 20 },
+    15: { rating: 60, potential: 20 },
+    16: { rating: 62, potential: 20 },
+    17: { rating: 64, potential: 20 },
+    18: { rating: 65, potential: 20 },
+    19: { rating: 67, potential: 20 },
+    20: { rating: 69, potential: 20 }
 },
     
 // Helper: Calculate exact age from YYYYMMDD dob using today's date
@@ -1991,36 +1991,55 @@ applyWeeklyEvolution() {
     });
 },
 
-// Finaliza evolução: aposenta jogadores, limpa estado
 evolvePlayersEndOfSeason() {
-    // Aplicar qualquer resto não aplicado
-    if (this._playerSeasonEvolution) {
-        this._playerSeasonEvolution.forEach((evo, playerId) => {
-            const player = this.playersMap?.get(playerId);
-            if (!player) return;
-            // floatRating already has all weekly accumulations; just ensure final round
-            if (evo.totalChange > 0) {
-                player.rating = Math.round(Math.min(player.ratingPotential, evo.floatRating));
-            } else {
-                player.rating = Math.round(Math.max(20, evo.floatRating));
-            }
-        });
-    }
+    const currentYear = new Date().getFullYear() + this.seasonHistory.length;
+    const retiredIds = [];
     
-    // Remover jogadores aposentados
-    const retiredIds = this._seasonRetireCandidates || [];
+    this.players.forEach(player => {
+        if (player.retired) return;
+        
+        const age = currentYear - player.dob;
+        
+        if (age >= 33) {
+            const retireChance = Math.min(0.8, (age - 32) * 0.1);
+            if (Math.random() < retireChance) {
+                retiredIds.push(player.id);
+                return;
+            }
+            
+            const decline = (age - 32) * (0.4 + Math.random() * 0.6);
+            player.rating = Math.max(20, player.rating - decline);
+            return;
+        }
+        
+        if (player.rating >= player.ratingPotential) return;
+        
+        const distanceFromPotential = player.ratingPotential - player.rating;
+        
+        let growth = distanceFromPotential * (0.1 + Math.random() * 0.35);
+        
+        const maxAnnualGrowth = Math.min(10, distanceFromPotential * 0.2 + 2);
+        
+        growth = Math.min(growth, maxAnnualGrowth);
+        
+        player.rating = Math.min(
+            player.ratingPotential,
+            player.rating + growth
+        );
+    });
+    
+    // Remover jogadores aposentados permanentemente
     if (retiredIds.length > 0) {
         const retiredSet = new Set(retiredIds);
+        // Remover estatísticas dos jogadores aposentados para evitar mistura com novos jogadores
         this.playerStats = this.playerStats.filter(s => !retiredSet.has(String(s.playerId)) && !retiredSet.has(s.playerId));
+        // Limpar cache de stats para forçar recriação
         this.playerStatsCache = null;
         this.currentStatsYear = 0;
         this.players = this.players.filter(p => !retiredSet.has(p.id));
         this.invalidatePlayerCache();
         this.playersMap = new Map(this.players.map(p => [p.id, p]));
     }
-    
-    this._playerSeasonEvolution = null;
-    this._seasonRetireCandidates = null;
 },
 isTransferWindowOpen(week) {
     return (week >= 1 && week <= 9) || (week >= 28 && week <= 32);
@@ -2444,7 +2463,7 @@ executeTransfer(player, sellingClub, buyingClub, value) {
     this.invalidatePlayerCache();
     this._invalidateClubPlayersCache();
     
-    // Registrar transferência do jogador
+    // Registrar transferência do jogador apenas para controle de regras, sem salvar histórico em array
     if (!this.seasonTransfers.has(player.id)) {
         this.seasonTransfers.set(player.id, { count: 0, windows: [] });
     }
@@ -2998,7 +3017,12 @@ distributeAwards(stageId, standings) {
         // DEPOIS aplicar transições (type 100, etc.) para re-adicionar os times qualificados
         this.applyPromotionsAndRelegationsAllCountries(seasonResult);
         
-        // Evoluir jogadores no final da temporada
+        // Calcular e aplicar evolução dos jogadores no final da temporada
+        this.calculateSeasonEvolution(52);
+        // Aplicar toda a evolução de uma vez (simulação rápida não tem semanas)
+        for (let w = 0; w < 52; w++) {
+            this.applyWeeklyEvolution();
+        }
         this.evolvePlayersEndOfSeason();
         
         // Janela de transferências
@@ -3007,10 +3031,12 @@ distributeAwards(stageId, standings) {
         // Invalidar cache após transferências para que a próxima temporada use dados atualizados
         this.invalidatePlayerCache();
         
-        // Agregar trajetória ANTES de purgar
-        this.seasonHistory.push(seasonResult);
+        // Manter apenas a temporada atual — limpar tudo e re-adicionar
+        // Preserva seasonHistory.length como contador de temporadas
+        const seasonNum = this.seasonHistory.length;
+        this.seasonHistory = new Array(seasonNum); // stubs vazios para manter .length correto
+        this.seasonHistory.push(seasonResult); // index = seasonNum, length = seasonNum + 1
         this.aggregateTrajectoryData(seasonResult);
-        this.purgeOldSeasons();
         
         return seasonResult;
     },
@@ -3097,29 +3123,9 @@ distributeAwards(stageId, standings) {
         });
     },
 
-    // Purgar dados detalhados de temporadas anteriores para liberar memória
+    // purgeOldSeasons removido — seasonHistory agora sempre contém apenas a temporada atual
     purgeOldSeasons() {
-        // Manter apenas a última temporada com dados completos para visualização
-        if (this.seasonHistory.length <= 1) return;
-        
-        // Substituir temporadas antigas por stubs mínimos
-        for (let i = 0; i < this.seasonHistory.length - 1; i++) {
-            this.seasonHistory[i] = {
-                season: this.seasonHistory[i].season,
-                year: this.seasonHistory[i].year,
-                competitions: [], // Dados detalhados purgados
-                _purged: true
-            };
-        }
-        
-        // Limpar playerStats de transferência (não precisamos mais)
-        this.playerStats = this.playerStats.filter(s => !s.isTransfer);
-        
-        // Limpar rejectedOffers
-        this.rejectedOffers = [];
-        
-        // Limpar seasonTransfers (já não precisa entre temporadas)
-        this.seasonTransfers = new Map();
+        // Noop — dados antigos já não são armazenados
     },
 
 
@@ -4136,9 +4142,11 @@ if (hasUncompletedFeeders) return;
         this.evolvePlayersEndOfSeason();
         this.invalidatePlayerCache();
 
+        // Manter apenas a temporada atual — limpar tudo e re-adicionar
+        const seasonNum = this.seasonHistory.length;
+        this.seasonHistory = new Array(seasonNum);
         this.seasonHistory.push(seasonResult);
         this.aggregateTrajectoryData(seasonResult);
-        this.purgeOldSeasons();
         
         document.getElementById('saveProgressBtn').style.display = 'inline-block';
         this.seasonInProgress = false;
@@ -4577,14 +4585,14 @@ if (hasUncompletedFeeders) return;
         const seasonSelector = document.getElementById("viewSeason"); 
         seasonSelector.innerHTML = '';
         
-        // Apenas mostrar temporadas com dados (não purgadas)
-        this.seasonHistory.forEach((s, i) => { 
-            if (s._purged) return;
+        // Mostrar apenas a temporada atual (última entrada válida do array)
+        const lastSeason = this.seasonHistory[this.seasonHistory.length - 1];
+        if (lastSeason && !lastSeason._purged) {
             const option = document.createElement("option");
-            option.value = i + 1; 
-            option.textContent = `Temporada ${i + 1}`; 
-            seasonSelector.appendChild(option); 
-        });
+            option.value = this.seasonHistory.length; 
+            option.textContent = `Temporada ${this.seasonHistory.length}`; 
+            seasonSelector.appendChild(option);
+        }
         
         const hasOptions = seasonSelector.options.length > 0;
         seasonSelector.disabled = !hasOptions; 
@@ -4596,14 +4604,14 @@ if (hasUncompletedFeeders) return;
         const seasonSelector = document.getElementById("viewSeason"); 
         seasonSelector.innerHTML = '';
         
-        // Apenas temporadas não purgadas
-        this.seasonHistory.forEach((s, i) => { 
-            if (s._purged) return;
+        // Mostrar apenas a temporada atual
+        const lastSeason = this.seasonHistory[this.seasonHistory.length - 1];
+        if (lastSeason && !lastSeason._purged) {
             const option = document.createElement("option");
-            option.value = i + 1; 
-            option.textContent = `Temporada ${i + 1}`; 
-            seasonSelector.appendChild(option); 
-        });
+            option.value = this.seasonHistory.length; 
+            option.textContent = `Temporada ${this.seasonHistory.length}`; 
+            seasonSelector.appendChild(option);
+        }
         
         // Add current in-progress season
         if (this.currentSeasonPreview) {
@@ -4641,11 +4649,12 @@ competitionTypeNames: {
             season = this.seasonHistory.length + 1;
         } else {
             season = parseInt(seasonValue);
-            if (!season || isNaN(season) || season < 1 || season > this.seasonHistory.length) {
+            if (!season || isNaN(season) || this.seasonHistory.length === 0) {
                 document.getElementById("seasonResults").innerHTML = "<p>Selecione uma temporada válida</p>";
                 return;
             }
-            seasonData = this.seasonHistory[season - 1];
+            // Dados ficam sempre no último índice do array
+            seasonData = this.seasonHistory[this.seasonHistory.length - 1];
         }
         
         if (!seasonData || !seasonData.competitions || seasonData.competitions.length === 0) {
@@ -4699,7 +4708,7 @@ competitionTypeNames: {
         if (this.currentSeasonPreview && season === this.seasonHistory.length + 1) {
             return this.currentSeasonPreview;
         }
-        return this.seasonHistory[season - 1] || null;
+        return this.seasonHistory[this.seasonHistory.length - 1] || null;
     },
 
     onViewCountryChange() {
@@ -5247,9 +5256,7 @@ async displayGroupStandingsUpToRound(upToRound = null, containerElement = null) 
     }
     
     const groupHeader = document.createElement("h3");
-    groupHeader.textContent = `Grupo ${currentGroup.id}`;
     groupHeader.style.textAlign = "center";
-    groupHeader.style.marginBottom = "20px";
     container.appendChild(groupHeader);
     
     const table = document.createElement("table");

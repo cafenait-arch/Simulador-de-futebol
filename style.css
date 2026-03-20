@@ -1,3 +1,7 @@
+@font-face {
+  font-family: 'Google';
+  src: url('Google.ttf') format('truetype');
+}
 /* Reset */
 * {
     margin: 0;
@@ -5,14 +9,13 @@
     box-sizing: border-box;
     border: none;
     font-family: 'Roboto';
-    font-size: 10px;
+    font-size: 11px;
     font-weight: bold;
-    text-transform: uppercase;
 }
 
 /* Base */
 body {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(135deg, darkblue 0%, darkviolet 100%);
     color: black;
     min-height: 100vh;
 }
@@ -21,7 +24,6 @@ body {
     max-width: 620px;
     margin: 0 auto;
     background: white;
-    border-radius: 8px;
     overflow: hidden;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
 }
@@ -112,7 +114,6 @@ body {
 .section-card {
     background: #f9fafb;
     border: 1px solid #e5e7eb;
-    border-radius: 6px;
     padding: 12px;
     margin-bottom: 12px;
 }
@@ -168,7 +169,6 @@ select,
 input {
     padding: 7px 10px;
     border: 1.5px solid #d1d5db;
-    border-radius: 4px;
     background: white;
     transition: all 0.2s;
 }
@@ -189,7 +189,6 @@ button {
     background: linear-gradient(135deg, #1e3a8a, #1e40af);
     color: white;
     padding: 7px 13px;
-    border-radius: 4px;
     cursor: pointer;
     font-weight: 500;
     transition: all 0.2s;
@@ -273,8 +272,7 @@ button:active {
     overflow-y: auto;
     overflow-x: auto;
     background: white;
-    border-radius: 6px;
-    border: 1px solid #e5e7eb;
+    border: 1px solid gray;
 }
 
 /* Table */
@@ -300,8 +298,7 @@ button:active {
 /* Coluna de nomes (segunda coluna) com largura mínima maior */
 .standings-table th:nth-child(2),
 .standings-table td:nth-child(2) {
-    min-width: 160px;
-    max-width: 220px;
+    max-width: 130px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -383,28 +380,11 @@ button:active {
     display: grid;
     grid-template-columns: 1fr 70px 1fr;
     align-items: center;
+    gap: 4px;
 }
 
 .match {
     padding: 1px;
-}
-
-.matches-list > div:nth-child(even) .match,
-.group-matches-container > div:nth-child(even) .match {
-    background: #e6e6e6;
-}
-
-.matches-list > div:nth-child(odd) .match,
-.group-matches-container > div:nth-child(odd) .match {
-    background: #d6d6d6;
-}
-
-.playoff-round > .playoff-match:nth-child(even) .match {
-    background: #e6e6e6;
-}
-
-.playoff-round > .playoff-match:nth-child(odd) .match {
-    background: #d6d6d6;
 }
 
 .team-home {
@@ -416,7 +396,6 @@ button:active {
 }
 
 .score {
-    font-family: 'archivo';
     text-align: center;
     font-weight: 700;
     font-size: 11px;
@@ -435,8 +414,8 @@ button:active {
 }
 
 .logo {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     display: inline-block;
     vertical-align: middle;
 }
@@ -459,7 +438,6 @@ button:active {
     background: linear-gradient(135deg, #1e3a8a, #1e40af);
     color: white;
     padding: 10px;
-    border-radius: 6px;
     margin-bottom: 12px;
     text-align: center;
 }
@@ -472,12 +450,10 @@ button:active {
 
 ::-webkit-scrollbar-track {
     background: #f3f4f6;
-    border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb {
-    background: #9ca3af;
-    border-radius: 4px;
+    background: #9ca3af;;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -525,10 +501,6 @@ button:active {
         padding: 4px;
     }
     
-    .container {
-        border-radius: 6px;
-    }
-    
     .header {
         padding: 10px 12px;
     }
@@ -565,14 +537,14 @@ button:active {
 
         .save-slot-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 9999; display: flex; align-items: center; justify-content: center; }
         .save-slot-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); }
-        .save-slot-content { position: relative; background: #1a1a2e; border: 1px solid #333; border-radius: 12px; padding: 24px; width: 90%; max-width: 500px; max-height: 80vh; overflow-y: auto; color: #fff; }
+        .save-slot-content { position: relative; background: #1a1a2e; border: 1px solid #333; padding: 24px; width: 90%; max-width: 500px; max-height: 80vh; overflow-y: auto; color: #fff; }
         .save-slot-content h2 { margin: 0 0 16px; font-size: 1.4em; text-align: center; }
         .save-slot-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
-        .save-slot-item { display: flex; align-items: center; justify-content: space-between; background: #16213e; border: 1px solid #444; border-radius: 8px; padding: 12px 16px; cursor: pointer; transition: background 0.2s; }
+        .save-slot-item { display: flex; align-items: center; justify-content: space-between; background: #16213e; border: 1px solid #444; padding: 12px 16px; cursor: pointer; transition: background 0.2s; }
         .save-slot-item:hover { background: #1a2744; border-color: #4ade80; }
         .save-slot-item .slot-info { flex: 1; }
         .save-slot-item .slot-name { font-weight: 700; font-size: 1.05em; }
         .save-slot-item .slot-meta { font-size: 0.85em; color: #aaa; margin-top: 2px; }
-        .save-slot-item .slot-delete { background: #e74c3c; border: none; color: #fff; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 0.85em; margin-left: 8px; }
+        .save-slot-item .slot-delete { background: #e74c3c; border: none; color: #fff; padding: 4px 10px; cursor: pointer; font-size: 0.85em; margin-left: 8px; }
         .save-slot-item .slot-delete:hover { background: #c0392b; }
         .save-slot-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
